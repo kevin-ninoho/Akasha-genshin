@@ -1,0 +1,960 @@
+/* 类 GPT 前端 · 逻辑
+ *
+ * 把知识库内置的 AI 抽出来独立使用：
+ *   浏览器 → POST /kb/api/chat (SSE) → 知识库服务 → 检索增强 + deepseek-flash
+ * 前端只做四件事：解析事件流、渲染带引用的回答、把 [n] 变成可跳转链接、本地存会话。
+ */
+(function () {
+  'use strict';
+
+  var LS_CONVOS = 'dsh-chat-front/conversations/v1';
+  var LS_THINK = 'dsh-chat-front/think';
+
+  var STARTERS = [
+    '胡桃是谁',
+    '钟离和往生堂是什么关系',
+    '雷电将军的语音',
+    '往生堂是什么样的地方',
+    '采药相关的书籍记载',
+    '芙宁娜的角色故事',
+  ];
+
+  var $ = function (id) { return document.getElementById(id); };
+  var els = {
+    side: $('side'), menu: $('menu'), new: $('new'), convos: $('convos'),
+    model: $('model'), dot: $('dot'),
+    title: $('title'), provider: $('provider'), reset: $('reset'),
+    log: $('log'), input: $('input'), send: $('send'), think: $('think'), hint: $('hint'),
+  };
+
+  // ⚠ 这里**曾经**有一个 cfg = { kbLink: ... }，以及基于它拼地址的 kbUrl()。
+  //   两个都已删除 —— 客户端里不再保留任何"知识库地址"的概念。
+  //
+  //   删掉的理由：kbLink 曾经是「引用 chip 能不能点」的开关，而它的值来自服务端
+  //   /config.json（本地模式会填成 http://127.0.0.1:5178/）。也就是说，
+  //   一个**配置文件就能把这个客户端变回"能打开知识库本体"**。
+  //   一个改配置就破的约束不叫约束，所以现在连这个概念都不存在了：
+  //   引用恒为不可点的标签，要看原文用浏览器开 5178。
+  var state = {
+    convos: [],
+    curId: null,
+    streaming: false,
+    abort: null,
+    think: false,
+    botEl: null,
+    botMsg: null,
+    paintQueued: false,
+  };
+
+  // ------------------------------------------------------------------ 工具
+
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function uid() {
+    return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+
+  var toastEl = null;
+  function toast(msg) {
+    if (!toastEl) {
+      toastEl = document.createElement('div');
+      toastEl.className = 'toast';
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = msg;
+    toastEl.classList.add('on');
+    clearTimeout(toastEl._t);
+    toastEl._t = setTimeout(function () { toastEl.classList.remove('on'); }, 2200);
+  }
+
+  // ------------------------------------------------------------------ 渲染：Markdown
+
+  /** 行内：先转义，再支持 **粗体**、`代码`、[n] 引用。 */
+  function inline(raw) {
+    return esc(raw)
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\[(\d{1,2})\]/g, '<span class="cite" data-ref="$1">[$1]</span>');
+  }
+
+  /** 块级：``` 代码块、### 标题、有序/无序列表、> 引用、段落。 */
+  function rich(text) {
+    var lines = String(text || '').split(/\r?\n/);
+    var out = [];
+    var list = null;
+    var code = null;
+
+    function closeList() { if (list) { out.push('</' + list + '>'); list = null; } }
+    function closeCode() {
+      if (code !== null) { out.push('<pre><code>' + esc(code.join('\n')) + '</code></pre>'); code = null; }
+    }
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var t = line.trim();
+
+      if (/^```/.test(t)) { if (code === null) { closeList(); code = []; } else { closeCode(); } continue; }
+      if (code !== null) { code.push(line); continue; }
+
+      if (!t) { closeList(); continue; }
+
+      var h = /^(#{1,6})\s+(.*)$/.exec(t);
+      if (h) {
+        closeList();
+        var lv = Math.min(6, h[1].length + 2);
+        out.push('<h' + lv + '>' + inline(h[2]) + '</h' + lv + '>');
+        continue;
+      }
+      if (/^[-*]\s+/.test(t)) {
+        if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; }
+        out.push('<li>' + inline(t.replace(/^[-*]\s+/, '')) + '</li>');
+        continue;
+      }
+      var om = /^\d+[.)]\s+(.*)$/.exec(t);
+      if (om) {
+        if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; }
+        out.push('<li>' + inline(om[1]) + '</li>');
+        continue;
+      }
+      if (/^>\s?/.test(t)) { closeList(); out.push('<blockquote>' + inline(t.replace(/^>\s?/, '')) + '</blockquote>'); continue; }
+
+      closeList();
+      out.push('<p>' + inline(t) + '</p>');
+    }
+    closeCode(); closeList();
+    return out.join('');
+  }
+
+  // ------------------------------------------------------------------ 存储
+
+  function loadConvos() {
+    try {
+      var raw = localStorage.getItem(LS_CONVOS);
+      state.convos = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(state.convos)) state.convos = [];
+    } catch (e) { state.convos = []; }
+    try { state.think = localStorage.getItem(LS_THINK) === '1'; } catch (e) { /* ignore */ }
+  }
+
+  function saveConvos() {
+    try {
+      var s = JSON.stringify(state.convos);
+      // 块（语音列表/关系图/表格）比纯文字重得多，而 localStorage 只有 ~5MB。
+      // 超阈值就把**较旧**会话里的块丢掉，宁可它们降级成纯文字，
+      // 也不能让整个历史写不进去（那会连带丢会话标题和全部问答）。
+      if (s.length > 3.5e6) {
+        var slim = state.convos.map(function (c, ci) {
+          if (ci < 3) return c;
+          var cc = {};
+          for (var k in c) cc[k] = c[k];
+          cc.messages = c.messages.map(function (m) {
+            if (!m.blocks || !m.blocks.length) return m;
+            var mm = {};
+            for (var k2 in m) mm[k2] = m[k2];
+            mm.blocks = null;
+            mm.blocksDropped = true;
+            return mm;
+          });
+          return cc;
+        });
+        s = JSON.stringify(slim);
+      }
+      localStorage.setItem(LS_CONVOS, s);
+    } catch (e) { /* 配额满或隐私模式：静默忽略，不影响对话 */ }
+  }
+
+  function cur() {
+    for (var i = 0; i < state.convos.length; i++) if (state.convos[i].id === state.curId) return state.convos[i];
+    return null;
+  }
+
+  function newConvo(activate) {
+    var c = { id: uid(), title: '新对话', at: Date.now(), messages: [] };
+    state.convos.unshift(c);
+    if (activate !== false) state.curId = c.id;
+    saveConvos();
+    renderSidebar();
+    if (activate !== false) renderLog();
+    return c;
+  }
+
+  // ------------------------------------------------------------------ 渲染：侧栏
+
+  function renderSidebar() {
+    if (!state.convos.length) {
+      els.convos.innerHTML = '<div class="empty-list">还没有对话。<br>点上面「新对话」开始。</div>';
+      return;
+    }
+    els.convos.innerHTML = state.convos.map(function (c) {
+      return '<div class="convo' + (c.id === state.curId ? ' on' : '') + '" data-id="' + c.id + '">' +
+        '<span class="t">' + esc(c.title) + '</span>' +
+        '<button class="del" data-del="' + c.id + '" title="删除">✕</button></div>';
+    }).join('');
+  }
+
+  // ------------------------------------------------------------------ 渲染：消息
+
+  // ------------------------------------------------------------------ 渲染：结构化答案块
+  //
+  // 六种块的渲染器。块是纯数据（见 kb-viz/lib/blocks.mjs），这里只负责画。
+  // 全部走 esc()，块里的文本来自知识库，不信任。
+
+  function blockBody(b) {
+    switch (b.kind) {
+      case 'image': return blockImage(b);
+      case 'voice-list': return blockVoice(b);
+      case 'relation-graph': return blockRelation(b);
+      case 'stat-table': return blockStat(b);
+      case 'list': return blockList(b);
+      case 'timeline': return blockTimeline(b);
+      case 'talent': return blockTalent(b);
+      case 'constellation': return blockConstellation(b);
+      case 'ascension': return blockAscension(b);
+      case 'video-scenes': return window.AkashaMedia ? window.AkashaMedia.render(b) : '';
+      default: return '<div class="blk-none">（未支持的结果类型：' + esc(b.kind) + '）</div>';
+    }
+  }
+
+  /** 天赋：可折叠，倍率表横向滚动。 */
+  function blockTalent(b) {
+    return (b.items || []).map(function (t) {
+      var mul = '';
+      if (t.multipliers) {
+        mul = '<div class="blk-tw blk-mul">' + '<table class="blk-tbl"><thead><tr>' +
+          t.multipliers.header.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') +
+          '</tr></thead><tbody>' + t.multipliers.rows.map(function (r) {
+            return '<tr>' + r.map(function (c, i) {
+              return i === 0 ? '<th class="rowh">' + esc(c) + '</th>' : '<td>' + esc(c) + '</td>';
+            }).join('') + '</tr>';
+          }).join('') + '</tbody></table>' +
+          (t.multipliers.truncated ? '<div class="blk-hint">倍率表已截断，完整表请在知识库查看</div>' : '') + '</div>';
+      }
+      return '<details class="blk-vg"' + (t.multipliers ? ' open' : '') + '>' +
+        '<summary>' + esc(t.title || t.tab) + '<span class="cnt">' + esc(t.tab) + '</span></summary>' +
+        '<div class="blk-line blk-desc">' + esc(t.desc || '') + '</div>' + mul + '</details>';
+    }).join('');
+  }
+
+  /** 命之座：序号 + 名称 + 描述。 */
+  function blockConstellation(b) {
+    var note = b.incomplete
+      ? '<div class="blk-warn">' + esc(b.note || '') + '</div>' : '';
+    var list = (b.items || []).map(function (c) {
+      return '<div class="blk-cons">' +
+        '<div class="hd"><span class="idx">' + c.index + '</span>' +
+        (c.icon ? '<img class="ico" src="' + esc(c.icon) + '" alt="" loading="lazy">' : '') +
+        '<span class="nm">' + esc(c.name) + '</span></div>' +
+        (c.desc ? '<div class="ds">' + esc(c.desc) + '</div>' : '<div class="ds muted">（观测枢未填写描述）</div>') +
+        '</div>';
+    }).join('');
+    return note + list;
+  }
+
+  /** 培养材料：分阶段，材料带图标与数量。 */
+  function blockAscension(b) {
+    return (b.items || []).map(function (s) {
+      return '<div class="blk-stage"><h4>' + esc(s.stage) + '</h4>' +
+        '<div class="blk-mats">' + (s.materials || []).map(function (m) {
+          return '<figure title="' + esc(m.name) + '">' +
+            (m.icon ? '<img src="' + esc(m.icon) + '" alt="" loading="lazy">' : '<span class="noimg"></span>') +
+            '<figcaption>' + esc(m.name) + ' ×' + m.amount + '</figcaption></figure>';
+        }).join('') + '</div></div>';
+    }).join('') + (b.truncated ? '<div class="blk-hint">还有更多阶段未显示</div>' : '');
+  }
+
+  function blockImage(b) {
+    if (!b.items || !b.items.length) return '';
+    // compact：问到某个角色时附的视觉锚点，不该占掉整屏
+    return '<div class="blk-imgs' + (b.compact ? ' compact' : '') + '">' + b.items.map(function (i) {
+      return '<figure><img src="' + esc(i.url) + '" alt="' + esc(i.label) + '" loading="lazy">' +
+        (b.compact ? '' : '<figcaption>' + esc(i.label) + '</figcaption>') + '</figure>';
+    }).join('') + '</div>';
+  }
+
+  function blockVoice(b) {
+    return (b.groups || []).map(function (g) {
+      return '<details class="blk-vg"><summary>' + esc(g.name) +
+        '<span class="cnt">· ' + g.count + ' 条</span></summary>' +
+        (g.lines || []).map(function (l) {
+          return '<div class="blk-line"><b>' + esc(l.name) + '</b><span>' + esc(l.text) + '</span></div>';
+        }).join('') + '</details>';
+    }).join('');
+  }
+
+  function blockRelation(b) {
+    var nodes = b.nodes || [], edges = b.edges || [];
+    if (!nodes.length) return '';
+    var others = nodes.filter(function (n) { return !n.self; });
+    var W = 720, H = Math.max(300, others.length * 26);
+    var cx = W / 2, cy = H / 2, rad = Math.min(W, H) / 2 - 48;
+    var pos = {};
+    pos[nodes[0].id] = [cx, cy];
+    others.forEach(function (n, i) {
+      var a = (i / Math.max(1, others.length)) * Math.PI * 2 - Math.PI / 2;
+      pos[n.id] = [cx + Math.cos(a) * rad, cy + Math.sin(a) * rad * 0.92];
+    });
+    var svg = edges.map(function (e) {
+      var p = pos[e.from], q = pos[e.to];
+      if (!p || !q) return '';
+      return '<line class="blk-edge" x1="' + p[0].toFixed(1) + '" y1="' + p[1].toFixed(1) +
+        '" x2="' + q[0].toFixed(1) + '" y2="' + q[1].toFixed(1) + '">' +
+        '<title>' + esc(e.quote || '') + '</title></line>';
+    }).join('');
+    svg += nodes.map(function (n) {
+      var p = pos[n.id];
+      if (!p) return '';
+      var cls = n.self ? 'blk-ns' : (n.kind === 'character' ? 'blk-nc' : 'blk-nx');
+      var anchor = n.self ? 'middle' : (p[0] < cx - 8 ? 'end' : p[0] > cx + 8 ? 'start' : 'middle');
+      var dx = n.self ? 0 : (p[0] < cx - 8 ? -12 : p[0] > cx + 8 ? 12 : 0);
+      var dy = n.self ? 5 : (Math.abs(p[0] - cx) <= 8 ? (p[1] < cy ? -12 : 18) : 5);
+      return '<circle class="' + cls + '" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) +
+        '" r="' + (n.self ? 11 : 7) + '"/>' +
+        '<text x="' + (p[0] + dx).toFixed(1) + '" y="' + (p[1] + dy).toFixed(1) +
+        '" text-anchor="' + anchor + '">' + esc(n.name) + '</text>';
+    }).join('');
+    return '<svg class="blk-graph" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet">' +
+      svg + '</svg><div class="blk-hint">悬停连线看原话 · 蓝=库内角色，黄=概念/物品</div>';
+  }
+
+  function blockStat(b) {
+    var kv = (b.profile || []).map(function (p) {
+      return '<div><b>' + esc(p.k) + '</b><span>' + esc(p.v) + '</span></div>';
+    }).join('');
+    var tables = (b.tables || []).map(function (t) {
+      return '<div class="blk-slot"><h4>' + esc(t.slot) +
+        '<span class="cnt">共 ' + t.total + ' 条' + (t.truncated ? '，此处前 ' + t.rows.length + ' 条' : '') + '</span></h4>' +
+        tableHtml(t.columns, t.rows) + '</div>';
+    }).join('');
+    return (kv ? '<div class="blk-kv">' + kv + '</div>' : '') + tables;
+  }
+
+  function blockList(b) {
+    return tableHtml(b.columns, b.rows) +
+      (b.truncated ? '<div class="blk-hint">共 ' + b.total + ' 条，此处只显示前 ' + b.rows.length + ' 条</div>' : '');
+  }
+
+  function blockTimeline(b) {
+    return '<div class="blk-tl">' + (b.items || []).map(function (i) {
+      return '<div class="blk-ti"><div class="hd"><span class="t">' + esc(i.title) + '</span>' +
+        '<span class="p">' + esc(i.page || '') + (i.era ? ' · ' + esc(i.era) : '') + '</span></div>' +
+        '<div class="e">' + esc(i.excerpt) + '</div></div>';
+    }).join('') + '</div>';
+  }
+
+  function tableHtml(columns, rows) {
+    if (!columns || !rows || !rows.length) return '';
+    // 单元格可以是字符串，也可以是 { text, icon } ——
+    // 推荐表里「护摩之杖」这类条目要带缩略图（用户要的是"武器信息 + 武器图片"）。
+    // 认不出对象就退化成纯文字，不会因为少了图就渲染不出来。
+    function cell(c) {
+      if (c && typeof c === 'object') {
+        var img = c.icon
+          ? '<img class="blk-ico" src="' + esc(c.icon) + '" alt="" loading="lazy">'
+          : '';
+        return '<td>' + img + '<span>' + esc(c.text == null ? '' : c.text) + '</span></td>';
+      }
+      return '<td>' + esc(c) + '</td>';
+    }
+    return '<div class="blk-tw"><table class="blk-tbl"><thead><tr>' +
+      columns.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + rows.map(function (r) {
+        return '<tr>' + r.map(cell).join('') + '</tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  function blocksHtml(m) {
+    if (!m.blocks || !m.blocks.length) {
+      return m.blocksDropped
+        ? '<div class="blk-none">（这条结果的结构化内容已因本地存储空间不足被清理，可在提问里重发一次）</div>'
+        : '';
+    }
+    return '<div class="blocks">' + m.blocks.map(function (b) {
+      return '<section class="blk blk-' + esc(b.kind) + '">' +
+        '<header><h3>' + esc(b.title) + '</h3>' +
+        (b.subtitle ? '<span class="sub">' + esc(b.subtitle) + '</span>' : '') + '</header>' +
+        blockBody(b) +
+        (b.source ? '<footer>来源：' + esc(b.source) + '</footer>' : '') +
+        '</section>';
+    }).join('') + '</div>';
+  }
+
+  /** 依据强度 + 引用审计：让用户一眼看出这段话可不可信。 */
+  function trustHtml(m) {
+    var bits = [];
+    var g = m.grounding;
+    if (g) {
+      var lv = g.level;
+      bits.push('<span class="tb ' + (lv === 'ok' ? 'ok' : lv === 'weak' ? 'warn' : 'bad') + '">' +
+        (lv === 'ok' ? '依据充分' : lv === 'weak' ? '依据较弱' : '无检索结果') + '</span>');
+      if (g.refused) bits.push('<span class="tb bad">已拒答 · 未调用模型</span>');
+      else if (g.anchors && g.anchors.length) {
+        bits.push('<span class="tb">命中 ' + g.anchors.map(function (a) { return esc(a.name); }).join('、') + '</span>');
+      }
+    }
+    var a = m.audit;
+    if (a) {
+      var cls = a.verdict === 'pass' ? 'ok' : a.verdict === 'warn' ? 'warn' : 'bad';
+      var label = a.verdict === 'pass' ? '引用审计通过' : a.verdict === 'warn' ? '部分句子无引用' : '存在无据内容';
+      bits.push('<span class="tb ' + cls + '" title="' + esc(a.note || '') + '">' +
+        label + ' · ' + a.cited + '/' + a.claims + ' 句有据</span>');
+    }
+    if (!bits.length) return '';
+    return '<div class="trust">' + bits.join('') + '</div>';
+  }
+
+  function msgHtml(m, i) {
+    if (m.role === 'user') {
+      return '<div class="wrap"><div class="msg user" data-mi="' + i + '">' +
+        '<div class="who"><span class="ava">你</span>你</div>' +
+        '<div class="body">' + esc(m.text) + '</div></div></div>';
+    }
+
+    var think = '';
+    if (m.thinking) {
+      think = '<details class="think"><summary>思考过程 · ' + m.thinking.length + ' 字</summary>' +
+        '<div class="tbody">' + esc(m.thinking) + '</div></details>';
+    }
+
+    var body = m.text ? rich(m.text)
+      : (m.error ? '' : '<span class="cursor"></span>');
+
+    var sources = '';
+    if (m.sources && m.sources.length) {
+      // 引用 chip **一律是标签，不是链接**，无条件。
+      //
+      // 这里以前按「本机有没有知识库浏览器界面」分叉：有值就渲染成 <a target="_blank">，
+      // 没有就渲染成 span。问题是"有值"这件事可以被配置改出来 ——
+      // 于是本地模式下引用变成可点链接，一点就打开知识库本体（5178），
+      // 而桌面端旧的回环白名单还恰好允许它开新窗。
+      //
+      // 现在把这个分支整个删掉：客户端里不再存在"能渲染出知识库链接"的代码。
+      // 原文本来就在 chip 的悬停提示里（tip），要看整条用浏览器开 5178。
+      sources = '<div class="sources"><span class="lbl">引用</span>' + m.sources.map(function (s) {
+        var tip = String(s.text || '').replace(/\s+/g, ' ').slice(0, 160);
+        var inner = '<em>[' + esc(s.ref) + ']</em><span>' + esc(s.title) + '</span>';
+        return '<span class="src src-plain" title="' + esc(tip) + '">' + inner + '</span>';
+      }).join('') + '</div>';
+    }
+
+    var note = '';
+    if (m.provider === 'extractive') {
+      note = '<div class="note warn">检索模式 · 未接入生成模型，返回知识库原文摘录</div>';
+    } else if (m.provider) {
+      // 只显示耗时。
+      // 以前这里写的是「openai · koboldcpp/qwen2.5-7b-instruct-q4_k_m-00001-of-00002 · 2.5s」——
+      // 那是**运维视角**，不该出现在客户的界面上：
+      //   客户不关心后面接的是哪家模型、更不该看到 "koboldcpp" 这种自建服务的名字。
+      // 模型名保留在 title 里，需要排查时鼠标悬停能看到。
+      note = '<div class="note"' +
+        (m.model ? ' title="' + esc((m.provider || '') + (m.model ? ' · ' + m.model : '')) + '"' : '') + '>' +
+        (m.elapsedMs ? (m.elapsedMs / 1000).toFixed(1) + 's' : '') + '</div>';
+    }
+
+    var err = m.error ? '<div class="err">' + esc(m.error) + '</div>' : '';
+
+    var acts = '<div class="acts">' +
+      '<button data-copy="' + i + '">复制</button>' +
+      (m.error ? '<button data-retry="' + i + '">重试</button>'
+               : (m.streaming ? '' : '<button data-regen="' + i + '">重新生成</button>')) +
+      '</div>';
+
+    return '<div class="wrap"><div class="msg bot" data-mi="' + i + '">' +
+      '<div class="who"><span class="ava">AI</span>Akasha</div>' +
+      think + trustHtml(m) +
+      // 块排在文字**前面**：模型在有块时会回「上面就是全部」，
+      // 所以必须先有「上面」，否则那句话指不到东西。
+      blocksHtml(m) +
+      '<div class="body">' + body + '</div>' + sources + err + note + acts + '</div></div>';
+  }
+
+  function emptyHtml() {
+    return '<div class="hero">' +
+      '<div class="big">💬</div>' +
+      '<h2>Akasha</h2>' +
+      '<p>提瓦特知识助手 · 检索知识库作答，结论带 [n] 引用，可点回原文。</p>' +
+      '<div class="archon-row" id="archon-row"></div>' +
+      '<div class="starters">' + STARTERS.map(function (s) {
+        return '<button class="starter" data-say="' + esc(s) + '">' + esc(s) + '</button>';
+      }).join('') + '</div></div>';
+  }
+
+  /**
+   * 空状态那排角色头像。
+   *
+   * 形象走 /v1/asset 取知识库自己的立绘 —— 客户端不需要另带图片资源。
+   * 摆最近实装的 8 个，点一下直接问「XXX是谁」。
+   * 拿不到就静默收掉：这只是装饰，不该因为它失败让空状态报错。
+   */
+  var archonRowLoaded = false;
+  function loadArchonRow() {
+    if (archonRowLoaded) return;
+    // 还没渲染到空状态就先不加载，等下次（别把标记置上，否则永远不加载了）
+    if (!document.getElementById('archon-row')) return;
+    archonRowLoaded = true;
+    fetch('/v1/query?domain=character&sort=release_desc&limit=8')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        // ⚠ 必须在 then 里**重新取元素**，不能用 fetch 之前的引用：
+        //   这段请求是异步的，期间 renderLog() 很可能已经重画过一遍，
+        //   事先抓的那个节点已经脱离文档 —— 往它写 innerHTML 不会有任何效果
+        //   （表现就是"代码跑了、没报错、但界面上什么都没有"）。
+        var box = document.getElementById('archon-row');
+        if (!box) return;
+        if (!j || !j.items || !j.items.length) { box.style.display = 'none'; return; }
+        box.innerHTML = j.items.map(function (c) {
+          return '<button type="button" data-say="' + esc(c.name + '是谁') + '" title="' + esc(c.name) + '">' +
+            '<img src="/v1/asset/character/' + c.id + '?size=icon" alt="' + esc(c.name) + '" loading="lazy">' +
+            '<span>' + esc(c.name) + '</span></button>';
+        }).join('');
+      })
+      .catch(function () { /* 装饰而已，失败就算了 */ });
+  }
+
+  var modelCache = '';
+  function modelName() { return modelCache; }
+
+  function renderLog() {
+    var c = cur();
+    els.title.textContent = c ? c.title : '新对话';
+    if (!c || !c.messages.length) {
+      els.log.innerHTML = emptyHtml();
+      loadArchonRow();
+      state.botEl = null;
+      return;
+    }
+    els.log.innerHTML = c.messages.map(msgHtml).join('');
+    state.botEl = null;
+  }
+
+  function nearBottom() {
+    return els.log.scrollHeight - els.log.scrollTop - els.log.clientHeight < 120;
+  }
+  function scrollDown(force) {
+    if (force || nearBottom()) els.log.scrollTop = els.log.scrollHeight;
+  }
+
+  // ------------------------------------------------------------------ 流式问答
+
+  function schedulePaint() {
+    if (state.paintQueued) return;
+    state.paintQueued = true;
+    requestAnimationFrame(function () {
+      state.paintQueued = false;
+      var m = state.botMsg;
+      var box = state.botEl;
+      if (!m || !box) return;
+      var body = box.querySelector('.body');
+      if (body) body.innerHTML = rich(m.text) + (m.streaming ? '<span class="cursor"></span>' : '');
+      var think = box.querySelector('.think');
+      if (!think && m.thinking) {
+        // 思考过程是后到的，插到 body 前面
+        var d = document.createElement('details');
+        d.className = 'think';
+        d.innerHTML = '<summary>思考过程 · ' + m.thinking.length + ' 字</summary>' +
+          '<div class="tbody">' + esc(m.thinking) + '</div>';
+        box.insertBefore(d, body);
+      } else if (think && m.thinking) {
+        think.querySelector('.tbody').textContent = m.thinking;
+        think.querySelector('summary').textContent = '思考过程 · ' + m.thinking.length + ' 字';
+      }
+      scrollDown(false);
+    });
+  }
+
+  async function ask(text) {
+    var c = cur() || newConvo();
+    var wasFirst = c.messages.length === 0;
+
+    c.messages.push({ role: 'user', text: text, at: Date.now() });
+    if (wasFirst) {
+      c.title = text.replace(/\s+/g, ' ').slice(0, 22) || '新对话';
+      els.title.textContent = c.title;
+      renderSidebar();
+    }
+
+    var bot = {
+      role: 'bot', text: '', sources: [], thinking: '',
+      provider: '', model: '', streaming: true, at: Date.now(),
+      // 结构化块与两个护栏结论。块要持久化：模型在有块时会回「上面就是全部」，
+      // 刷新后如果把块丢了，那句话就指不到任何东西。
+      blocks: [], grounding: null, audit: null,
+    };
+    c.messages.push(bot);
+    saveConvos();
+
+    // 全量重画后抓住这条 bot 的 DOM 引用，后续只局部更新
+    els.log.innerHTML = c.messages.map(msgHtml).join('');
+    var idx = c.messages.length - 1;
+    state.botMsg = bot;
+    state.botEl = els.log.querySelector('.msg.bot[data-mi="' + idx + '"]');
+    state.botWrap = state.botEl ? state.botEl.parentNode : null;   // .wrap，收尾替换要用它
+    scrollDown(true);
+
+    setStreaming(true);
+    state.abort = new AbortController();
+    var t0 = Date.now();
+
+    try {
+      var res = await fetch('/v1/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify({ message: text, sessionId: 'web-' + c.id, think: state.think }),
+        signal: state.abort.signal,
+      });
+      if (!res.ok) {
+        var t = await res.text().catch(function () { return ''; });
+        var msg = 'HTTP ' + res.status;
+        try { var j = JSON.parse(t); if (j.error) msg = j.error.message || msg; } catch (e) { /* ignore */ }
+        throw new Error(msg);
+      }
+
+      var reader = res.body.getReader();
+      var dec = new TextDecoder();
+      var buf = '';
+      var done = false;
+
+      while (!done) {
+        var r = await reader.read();
+        if (r.done) break;
+        buf += dec.decode(r.value, { stream: true });
+        var nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          var line = buf.slice(0, nl).replace(/\r$/, '');
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith('data:')) continue;
+          var payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          var ev;
+          try { ev = JSON.parse(payload); } catch (e) { continue; }
+          if (ev.type === 'delta') { bot.text += ev.text || ''; schedulePaint(); }
+          else if (ev.type === 'sources') { bot.sources = ev.sources || []; schedulePaint(); }
+          else if (ev.type === 'thinking') { bot.thinking += ev.text || ''; schedulePaint(); }
+          // 依据强度（ok / weak / none）与硬拒答标记
+          else if (ev.type === 'grounding') { bot.grounding = ev; schedulePaint(); }
+          // 结构化答案块：图片 / 语音 / 关系图 / 数据表 / 列表 / 时间轴
+          else if (ev.type === 'blocks') { bot.blocks = ev.blocks || []; schedulePaint(); }
+          // 引用审计：逐句核对 [n] 是否指向真实来源
+          else if (ev.type === 'audit') { bot.audit = ev; }
+          else if (ev.type === 'error') { bot.error = ev.message || '生成失败，请重试。'; schedulePaint(); }
+          else if (ev.type === 'provider') {
+            bot.provider = ev.provider;
+            bot.model = ev.model;
+            // 以实际使用的 provider 为准更新状态栏（extractive = 模型没派上用场）
+            if (ev.provider === 'extractive') {
+              degraded = ev.reason || '未接入生成模型';
+            } else if (ev.provider) {
+              degraded = null;
+              // 真的生成过一次回答 = 链路确实通。
+              // 必须记这一笔，不能只靠 /kb/api/chat/status 判断 ——
+              // 客户端模式下知识库在服务端，那个**内部**接口不对外暴露，
+              // 探测必然失败。结果就是：回答、立绘、引用全都正常出来了，
+              // 左下角却写着「未连接」（笔记本实测遇到过）。
+              servedOnce = true;
+            }
+            paintStatus();
+          }
+          else if (ev.type === 'done') {
+            bot.failed = ev.failed === true;
+            if (bot.failed && !bot.error) bot.error = '回答未完成，请重试。';
+            bot.elapsedMs = ev.elapsedMs;
+            if (ev.answer) bot.text = ev.answer;
+            if (ev.grounding) bot.grounding = ev.grounding;
+            if (ev.audit) bot.audit = ev.audit;
+          }
+        }
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        bot.error = null;
+        bot.aborted = true;
+        if (!bot.text) bot.text = '（已停止）';
+      } else {
+        bot.error = (err && err.message) || String(err);
+      }
+    } finally {
+      bot.streaming = false;
+      bot.elapsedMs = bot.elapsedMs || (Date.now() - t0);
+      setStreaming(false);
+      state.abort = null;
+      saveConvos();
+      // 收尾重画这一条（补上引用/元信息/操作按钮）。
+      // 注意：替换的是外层 .wrap，不是 .msg.bot —— 否则会把新 .wrap 嵌进旧 .wrap 里。
+      var html = msgHtml(bot, idx);
+      var tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      if (state.botWrap && state.botWrap.parentNode) {
+        state.botWrap.parentNode.replaceChild(tmp.firstChild, state.botWrap);
+      }
+      state.botEl = els.log.querySelector('.msg.bot[data-mi="' + idx + '"]');
+      state.botWrap = null;
+      state.botMsg = null;
+      scrollDown(false);
+    }
+  }
+
+  function setStreaming(on) {
+    state.streaming = on;
+    els.send.classList.toggle('stop', on);
+    els.send.title = on ? '停止生成' : '发送';
+    els.send.disabled = false;
+    els.send.innerHTML = on
+      ? '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12l15-7-6.2 15-2.1-6.1L4 12z" fill="currentColor"/></svg>';
+    // 客户端模式连的是远端知识库，写「本地」是错的
+    els.hint.textContent = on ? '生成中…（点右侧按钮可停止）' : '回答基于知识库检索，带 [n] 引用';
+  }
+
+  // ------------------------------------------------------------------ 服务端状态
+
+  // /api/chat/status 只报告「配置」——即使端点根本连不上，它照样说 provider=openai。
+  // 所以真实可用性以**生成时实际用的 provider** 为准：一旦降级过就记住，
+  // 直到下一次真的用上模型为止。否则状态栏会在模型挂掉时显示绿灯，误导人。
+  var degraded = null;   // null = 未知/正常；字符串 = 降级原因
+
+  // 真的生成过一次回答吗。
+  // 为什么需要它：状态探测打的是 /kb/api/chat/status —— 知识库的**内部**接口。
+  // 客户端模式下知识库在服务端，那个接口不对外暴露（只放行了 /v1），
+  // 探测必然失败，于是回答/立绘/引用全都正常出来了，左下角却写着「未连接」。
+  // 用户看到这个只会以为坏了。生成成功是**最强的证据**，用它兜底。
+  var servedOnce = false;
+
+  /**
+   * 左下角状态 + 顶栏那个小药丸。
+   *
+   * 原则：**这里给客户看的是「能不能用」，不是「后面接了什么」。**
+   * 以前直接把 provider 和 model 名贴上去，结果界面上写着
+   *   openai · koboldcpp/qwen2.5-7b-instruct-q4_k_m-00001-of-00002
+   * ——自建服务名、量化档位、分片序号全暴露了，客户既看不懂也不该看。
+   * 换成三档人话：在线 / 检索模式 / 未连接。技术细节留在 title 里（悬停可见），
+   * 排查问题时够用，正常使用时看不见。
+   */
+  function paintStatus() {
+    const detail = [(statusProvider || ''), (statusModel || '')].filter(Boolean).join(' · ');
+    const pill = els.provider;
+
+    if (degraded !== null) {
+      els.dot.className = 'dot bad';
+      els.model.textContent = '检索模式';
+      els.model.title = degraded || '生成模型不可用，已降级为原文摘录';
+      pill.hidden = false;
+      pill.textContent = '检索模式';
+      pill.title = degraded || '';
+      return;
+    }
+
+    // statusReady 是「配置探测」，servedOnce 是「实际跑通过」。
+    // 后者更可信，两者满足其一就算在线。
+    const ready = statusReady || servedOnce;
+    els.dot.className = 'dot ' + (ready ? 'ok' : 'bad');
+    els.model.textContent = !statusCorpusConfigured ? '未配置资料库' : ready ? '在线' : '未连接';
+    els.model.title = (detail ? detail + '\n' : '') + (statusReason || '');
+    pill.hidden = !ready;
+    pill.textContent = '在线';
+    pill.title = detail;
+  }
+
+  var statusCorpusConfigured = true;
+  var statusReady = false;
+  var statusProvider = '';
+  var statusModel = '';
+  var statusReason = '';
+
+  function refreshStatus() {
+    fetch('/v1/status').then(function (response) {
+      return response.json().then(function (body) {
+        if (!response.ok) throw new Error(body.error && body.error.message || body.message || '连接不上服务端');
+        return body;
+      });
+    }).then(function (j) {
+      statusProvider = j.provider || '';
+      statusModel = j.model || '';
+      statusReason = j.reason || '';
+      modelCache = j.model || '';
+      statusReady = !!j.ready;
+      if (j.capabilities && j.capabilities.corpus === false) {
+        servedOnce = false; degraded = null; statusCorpusConfigured = false;
+      } else {
+        statusCorpusConfigured = true;
+        degraded = j.provider === 'extractive' ? (j.reason || '生成模型不可用，已降级为摘录') : null;
+      }
+      paintStatus();
+    }).catch(function (error) {
+      statusReady = false; statusReason = error.message; paintStatus();
+    });
+  }
+
+  // ------------------------------------------------------------------ 事件绑定
+
+  els.new.addEventListener('click', function () {
+    newConvo();
+    els.input.focus();
+    if (window.innerWidth <= 720) els.side.classList.remove('open');
+  });
+
+  els.convos.addEventListener('click', function (ev) {
+    var del = ev.target.closest('[data-del]');
+    if (del) {
+      ev.stopPropagation();
+      var id = del.getAttribute('data-del');
+      state.convos = state.convos.filter(function (c) { return c.id !== id; });
+      if (state.curId === id) state.curId = state.convos.length ? state.convos[0].id : null;
+      saveConvos(); renderSidebar(); renderLog();
+      return;
+    }
+    var row = ev.target.closest('.convo');
+    if (row) {
+      state.curId = row.getAttribute('data-id');
+      renderSidebar(); renderLog();
+      if (window.innerWidth <= 720) els.side.classList.remove('open');
+    }
+  });
+
+  els.menu.addEventListener('click', function () { els.side.classList.toggle('open'); });
+
+  // ⚠ 这里原本绑了一个「打开知识库」按钮的点击（window.open(kbUrl('#/'))）。
+  //   按钮和事件都已删除：客户端不该有任何通往知识库本体的入口。
+  //   桌面端也同步把 setWindowOpenHandler 改成一律 deny —— 两层都堵上，
+  //   免得将来谁又加回一个链接就重新打开这条通道。
+
+  els.reset.addEventListener('click', function () {
+    var c = cur();
+    if (!c) return;
+    fetch('/kb/api/chat/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'web-' + c.id }),
+    }).then(function () { toast('已清空该会话的服务端上下文（本地记录保留）'); })
+      .catch(function () { toast('重置失败'); });
+  });
+
+  els.think.addEventListener('click', function () {
+    state.think = !state.think;
+    try { localStorage.setItem(LS_THINK, state.think ? '1' : '0'); } catch (e) { /* ignore */ }
+    els.think.classList.toggle('on', state.think);
+    els.think.textContent = state.think ? '🧠 深度思考 · 开' : '💡 深度思考 · 关';
+    els.think.title = state.think ? '深度思考：开（模型先推理再作答，较慢但更强）' : '深度思考：关（快速作答）';
+  });
+
+  // 输入框：自适应高度 + Enter 发送
+  function autoGrow() {
+    els.input.style.height = 'auto';
+    els.input.style.height = Math.min(200, els.input.scrollHeight) + 'px';
+  }
+  els.input.addEventListener('input', autoGrow);
+  els.input.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
+      ev.preventDefault();
+      submit();
+    }
+  });
+
+  els.send.addEventListener('click', function () {
+    if (state.streaming) { if (state.abort) state.abort.abort(); return; }
+    submit();
+  });
+
+  function submit() {
+    if (state.streaming) return;
+    var text = els.input.value.trim();
+    if (!text) return;
+    els.input.value = '';
+    autoGrow();
+    ask(text);
+  }
+
+  // 起始提示 / 引用跳转 / 复制 / 重生成
+  els.log.addEventListener('click', function (ev) {
+    var st = ev.target.closest('[data-say]');
+    if (st) { ask(st.getAttribute('data-say')); return; }
+
+    var cite = ev.target.closest('.cite');
+    if (cite) {
+      var ref = Number(cite.getAttribute('data-ref'));
+      var msgEl = cite.closest('.msg');
+      var mi = msgEl ? Number(msgEl.getAttribute('data-mi')) : -1;
+      var cc0 = cur();
+      var m0 = cc0 && cc0.messages[mi];
+      var list = (m0 && m0.sources) || [];
+      var hit = null;
+      for (var i = 0; i < list.length; i++) if (Number(list[i].ref) === ref) hit = list[i];
+      // ⚠ 以前这里 window.open 到知识库原文 —— 那是通往知识库本体的路径，已删除。
+      //   引用内容本来就在本轮对话里（下方「引用」的 chip 带悬停提示），
+      //   提示一下即可，不需要跳出客户端。
+      if (hit) toast('[' + ref + '] ' + (hit.title || '') + ' · 原文见下方「引用」');
+      else toast('引用 [' + ref + '] 在下方「引用」里有原文');
+      return;
+    }
+
+    var cp = ev.target.closest('[data-copy]');
+    if (cp) {
+      var idx = Number(cp.getAttribute('data-copy'));
+      var cc = cur();
+      var mm = cc && cc.messages[idx];
+      if (mm) {
+        var txt = mm.text || '';
+        if (navigator.clipboard) navigator.clipboard.writeText(txt).then(function () { toast('已复制'); });
+        else toast('当前环境不支持剪贴板');
+      }
+      return;
+    }
+
+    var rg = ev.target.closest('[data-regen]');
+    if (rg) {
+      var ri = Number(rg.getAttribute('data-regen'));
+      var rc = cur();
+      if (!rc) return;
+      for (var k = ri - 1; k >= 0; k--) {
+        if (rc.messages[k].role === 'user') {
+          var q = rc.messages[k].text;      // 先取文本，再连同这一轮的 bot 回答一起砍掉
+          rc.messages.splice(k);
+          saveConvos();
+          ask(q);
+          return;
+        }
+      }
+      return;
+    }
+
+    var rt = ev.target.closest('[data-retry]');
+    if (rt) {
+      var ti = Number(rt.getAttribute('data-retry'));
+      var tc = cur();
+      if (!tc) return;
+      var q = null;
+      for (var j = ti - 1; j >= 0; j--) if (tc.messages[j].role === 'user') { q = tc.messages[j].text; break; }
+      if (q) { tc.messages.splice(ti, 1); saveConvos(); ask(q); }
+    }
+  });
+
+  // ------------------------------------------------------------------ 启动
+
+  function boot() {
+    loadConvos();
+
+    els.think.classList.toggle('on', state.think);
+    els.think.textContent = state.think ? '🧠 深度思考 · 开' : '💡 深度思考 · 关';
+
+    // 这里原本 fetch('/config.json') 取 kbLink（决定引用 chip 能不能点）。
+    // 那个概念已整个删除，所以这次请求也没必要了 —— 界面不再依赖任何
+    // 来自服务端的"知识库地址"。直接渲染。
+    renderLog();
+
+    if (state.convos.length) {
+      state.curId = state.convos[0].id;
+    } else {
+      newConvo();
+    }
+    renderSidebar();
+    renderLog();
+    refreshStatus();
+    setInterval(refreshStatus, 20000);
+    autoGrow();
+    els.input.focus();
+  }
+
+  boot();
+})();

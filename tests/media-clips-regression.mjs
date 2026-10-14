@@ -1,0 +1,25 @@
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {spawnSync} from 'node:child_process';import{MediaJobs,videoSources,sceneBoundaries}from'../engine/lib/media-jobs.mjs';
+const temp=fs.mkdtempSync(path.join(os.tmpdir(),'akasha-media-test-')),exe=process.env.FFMPEG_PATH||'ffmpeg',probe=process.env.FFPROBE_PATH||'ffprobe';const fixture=path.join(temp,'fixture.mp4');
+const gen=spawnSync(exe,['-v','error','-f','lavfi','-i','color=black:s=320x180:d=4:r=25','-f','lavfi','-i','color=white:s=320x180:d=4:r=25','-f','lavfi','-i','color=black:s=320x180:d=4:r=25','-f','lavfi','-i','sine=frequency=440:duration=12','-filter_complex','[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]','-map','[v]','-map','3:a','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-y',fixture],{windowsHide:true,encoding:'utf8'});assert.equal(gen.status,0,gen.stderr);
+let acquisitions=0;const sourceUrl='https://example.invalid/synthetic.mp4';
+const flash=path.join(temp,'flash.mp4');const flashGen=spawnSync(exe,['-v','error','-f','lavfi','-i','color=black:s=320x180:d=12:r=25','-vf',"drawbox=color=white:t=fill:enable='between(t,4,4.08)'",'-c:v','libx264','-pix_fmt','yuv420p','-y',flash],{windowsHide:true,encoding:'utf8'});assert.equal(flashGen.status,0,flashGen.stderr);
+const jobs=new MediaJobs({root:path.join(temp,'cache'),ffmpeg:exe,ffprobe:probe,getSource:(id)=>[1,2].includes(id)?{title:'Synthetic PV',url:id===1?sourceUrl:sourceUrl.replace('synthetic','flash')}:null,acquire:async(url,file)=>{acquisitions++;fs.copyFileSync(url.includes('flash')?flash:fixture,file)}});
+async function finish(j){for(let i=0;i<1000;i++){const s=jobs.get(j.id,'owner');if(s.state==='failed')throw Error(s.error);if(s.state==='completed')return s.result;await new Promise(r=>setTimeout(r,20));}throw Error('Job timed out')}
+let n=0;const pass=s=>{n++;console.log('PASS '+s)};
+try{
+ const dense=sceneBoundaries(Array.from({length:399},(_,i)=>i+1),400);assert.equal(dense[0],0);assert.equal(dense.at(-1),400);assert.ok(dense.length<=251);assert.ok(dense.every((t,i)=>i===0||t>dense[i-1]));pass('dense scene cap never duplicates the endpoint or creates zero-length scenes');
+ assert.equal(videoSources({components:[{data:JSON.stringify({rich_text:'<video data-video-url="'+sourceUrl+'" src="'+sourceUrl+'"></video>'})}]}).length,1);pass('nested HTML URLs extracted and deduplicated');
+ const pending=jobs.scenes(1,0,'owner');assert.equal(jobs.get(pending.id,'other'),null);pass('jobs scoped to authenticated owner');
+ const scenes=await finish(pending);assert.ok(scenes.scenes.length>=3);assert.ok(Math.abs(scenes.scenes[0].end-4)<0.1);assert.ok(Math.abs(scenes.scenes[1].end-8)<0.1);assert.equal(scenes.hasAudio,true);pass('scene detection at real cuts with midpoint thumbnails');
+ const flashed=await finish(jobs.scenes(2,0,'owner'));assert.equal(flashed.scenes[0].start,0);for(let i=1;i<flashed.scenes.length;i++)assert.equal(flashed.scenes[i].start,flashed.scenes[i-1].end);assert.ok(Math.abs(flashed.scenes.reduce((sum,s)=>sum+s.end-s.start,0)-flashed.duration)<0.001);assert.ok(flashed.scenes.every(s=>s.end-s.start>=0.1));pass('nearby transition detections merge without missing any source time');
+ assert.ok(!JSON.stringify(jobs.get(pending.id,'owner')).includes(sourceUrl));assert.ok(!JSON.stringify(jobs.get(pending.id,'owner')).includes(temp));pass('public result contains neither source URL nor internal path');
+ await finish(jobs.scenes(1,0,'owner'));assert.equal(acquisitions,2);pass('repeated scene requests use cached index');
+ assert.throws(()=>jobs.clip(1,0,0,12,'owner'));assert.throws(()=>jobs.clip(1,0,-1,2,'owner'));assert.throws(()=>jobs.clip(1,0,0,70,'owner'));assert.throws(()=>jobs.clip(1,0,NaN,2,'owner'));pass('full-source and invalid intervals rejected');
+ const clip=await finish(jobs.clip(1,0,2,6,'owner'));const parts=clip.url.split('/');const asset=jobs.asset(parts[4],'clip',parts[6],'owner');assert.ok(asset);assert.equal(jobs.asset(parts[4],'clip',parts[6],'other'),null);
+ const info=JSON.parse(spawnSync(probe,['-v','error','-show_format','-show_streams','-of','json',asset.file],{encoding:'utf8',windowsHide:true}).stdout);assert.ok(Math.abs(Number(info.format.duration)-4)<0.12);assert.ok(info.streams.some(x=>x.codec_type==='audio'));pass('precise four-second MP4 with original audio and owner checks');
+ await finish(jobs.clip(1,0,2,6,'owner'));assert.equal(acquisitions,3);pass('identical clip requests reuse encoded output');
+ for(const d of fs.readdirSync(path.join(temp,'cache'),{withFileTypes:true}).filter(x=>/^[a-f0-9]{24}$/.test(x.name)))assert.ok(!fs.readdirSync(path.join(temp,'cache',d.name)).some(f=>f.startsWith('source-')||f.includes('.partial.')));pass('full-source temporary files removed');
+ jobs.limit=1;jobs.evict();assert.ok(!fs.existsSync(asset.file));pass('bounded cache evicts old assets');
+ console.log('Result: '+n+'/'+n+' passed');
+}finally{fs.rmSync(temp,{recursive:true,force:true})}

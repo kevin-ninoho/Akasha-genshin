@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to llm.config.json for local use. Environment variables KB_LLM_BASE_URL, KB_LLM_MODEL, KB_LLM_API_KEY and KB_LLM_PROVIDER override this file.",
+  "provider": "auto",
+  "baseUrl": "http://127.0.0.1:8080/v1",
+  "apiKey": "",
+  "model": "koboldcpp/Qwen2.5-7B-Instruct-Q4_K_M",
+  "temperature": 0.55,
+  "topP": 0.9,
+  "maxTokens": 8192,
+  "timeoutMs": 300000,
+  "thinking": null
+}

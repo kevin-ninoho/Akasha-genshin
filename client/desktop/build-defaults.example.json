@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy selected fields into the per-user config.json. The public build has no service URL or token.",
+  "kbDir": "",
+  "dataDir": "",
+  "kbRemoteV1": "",
+  "kbRemoteV1Fallbacks": [],
+  "videoIndexPath": ""
+}

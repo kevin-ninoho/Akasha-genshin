@@ -1,0 +1,21 @@
+{
+  "name": "akasha",
+  "private": true,
+  "version": "0.3.0",
+  "description": "Akasha open-source desktop client and knowledge-base engine",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start:v1": "node engine/serve-client.mjs",
+    "start:chat": "node client/servers/chat-app.mjs --port 5190",
+    "build:client": "node scripts/build-client.mjs",
+    "check:secrets": "node scripts/prepublish-check.mjs",
+    "desktop": "npm --prefix client run desktop",
+    "test": "node scripts/run-tests.mjs",
+    "test:core": "node scripts/run-tests.mjs --core",
+    "test:baselines": "node scripts/run-baselines.mjs"
+  },
+  "license": "AGPL-3.0-only"
+}

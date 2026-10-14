@@ -1,0 +1,33 @@
+name: Build local release artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable release version
+        required: true
+        default: '0.3.0'
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm --prefix client ci
+      - run: npm run check:secrets
+      - run: npm run test:core
+      - run: npm run build:client -- --version ${{ inputs.version }}
+        env:
+          AKASHA_GITHUB_OWNER: ${{ github.repository_owner }}
+          AKASHA_GITHUB_REPO: ${{ github.event.repository.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Akasha-${{ inputs.version }}
+          path: |
+            client/dist/**/Akasha-*.exe
+            client/dist/**/Akasha-*.blockmap
+            client/dist/**/latest.yml
+            client/dist/**/SHA256SUMS.txt

@@ -1,0 +1,50 @@
+# Run the root build script; it supplies version, update source and --publish never.
+appId: moe.ambr.akasha
+productName: Akasha
+copyright: Akasha contributors
+directories:
+  output: dist/client
+files:
+  - package.json
+  - desktop/**/*
+  - '!desktop/build/**'
+  - '!desktop/build-defaults.json'
+  - '!desktop/build-defaults.client.json'
+  - '!**/*.map'
+extraResources:
+  - from: ../LICENSE
+    to: LICENSE
+  - from: servers
+    to: servers
+    filter: ['**/*.mjs']
+  - from: web/chat
+    to: web/chat
+    filter: ['*.html', '*.js', '*.css']
+  - from: ../engine
+    to: engine
+    filter: ['**/*.mjs', '**/*.example.json', '!data/**', '!assets/**', '!cache/**', '!logs/**', '!**/llm.config.json']
+extraMetadata:
+  main: desktop/main.cjs
+  name: akasha
+  productName: Akasha
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  license: ../LICENSE
+  artifactName: Akasha-${version}-${arch}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Akasha
+  installerLanguages: [zh_CN]
+  language: '2052'
+  deleteAppDataOnUninstall: false
+portable:
+  artifactName: Akasha-${version}-${arch}-portable.${ext}
+publish: null

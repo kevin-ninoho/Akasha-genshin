@@ -1,0 +1,4 @@
+{
+  "_comment": "Private video source index. Do not commit a real file. URLs are consumed only by the server and are never returned to clients.",
+  "entries": []
+}
