@@ -23,7 +23,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { queryExpr, snippet } from './lib/tokenize.mjs';
 import { REGIONS, DEFAULT_REGION, ELEMENT_COLORS, ARCHONS } from './lib/domain.mjs';
 import { openWorkspace, runReadQuery } from './lib/workspace.mjs';
-import { searchStory, hasStory } from './lib/story-search.mjs';
 import { openObc, obcStats, obcList, obcEntry, obcRecommends, OBC_KIND_LABEL } from './lib/obc.mjs';
 import { runChat, resetSession, sessionCount } from './chat/agent.mjs';
 import { loadConfig, resolveProvider, configPath } from './chat/llm.mjs';
@@ -45,18 +44,7 @@ const q = (sql, ...p) => db.prepare(sql).all(...p);
 const one = (sql, ...p) => db.prepare(sql).get(...p);
 const ws = openWorkspace(path.join(DATA), { readonly: !WRITE_ENABLED });
 
-// 《日月全事》故事线在**侧车库**（story_* 表），主库 search_fts 里没有它，
-// 所以全文检索和 AI 检索都得单独查一次。这里另开一个只读连接专供检索，
-// 不去碰工作区那套读写封装（读侧车库不改它）。
-let storyDb = null;
-try {
-  storyDb = new DatabaseSync(path.join(DATA, 'kb-workspace.sqlite'), { readOnly: true });
-  if (!hasStory(storyDb)) storyDb = null;      // 还没导入故事线时当作没有
-} catch {
-  storyDb = null;                              // 文件不存在/被占用：静默降级
-}
-
-// 观测枢官方数据（obc_entries / obc_fts）同样在侧车库，另开一个只读连接。
+// 观测枢官方数据（obc_entries / obc_fts）在侧车库，另开一个只读连接。
 // 来源：米游社观测枢 baike.mihoyo.com（米哈游自营）的公开接口。
 // 数据由 dsh-integrations/gen-suite/tools/obc-import.mjs 导入；没有就当作没有。
 const obcDb = openObc(path.join(DATA));
@@ -167,7 +155,7 @@ function cardOf(row) {
 
 // ---------------------------------------------------------------- 检索
 
-const SEARCH_TYPES = new Set(['all', 'character', 'story', 'voice', 'dialogue', 'book', 'storyline']);
+const SEARCH_TYPES = new Set(['all', 'character', 'story', 'voice', 'dialogue', 'book']);
 
 function ftsRows(expr, type, limit) {
   const params = [expr];
@@ -183,8 +171,7 @@ function ftsRows(expr, type, limit) {
 
 function doSearch(query, type, limitPerGroup) {
   const expr = queryExpr(query);
-  // storyline = 《日月全事》故事线（侧车库），单独一组，不与主库的 story（角色故事）混
-  const groups = { character: [], story: [], voice: [], dialogue: [], book: [], storyline: [] };
+  const groups = { character: [], story: [], voice: [], dialogue: [], book: [] };
   if (!expr) return { query, groups, total: 0 };
 
   const rows = ftsRows(expr, type, Math.max(200, limitPerGroup * 12));
@@ -238,25 +225,6 @@ function doSearch(query, type, limitPerGroup) {
       score: round2(row.score),
       snippet: hl.html,
     });
-  }
-  // 《日月全事》故事线：内容在侧车库，主库 FTS 查不到，这里补一组。
-  // （收录了却搜不到，表现为「知识库里没有这条信息」——正是这个改动要修的。）
-  if (storyDb && (!type || type === 'all' || type === 'storyline')) {
-    for (const hit of searchStory(storyDb, query, limitPerGroup)) {
-      const hl = highlight(hit.text, query);
-      groups.storyline.push({
-        actId: hit.actId,
-        title: hit.title,
-        era: hit.era,
-        eraTime: hit.eraTime,
-        rowLine: hit.rowLine,
-        pages: hit.pages,
-        key: hit.key,
-        anchor: hit.anchor,
-        score: hit.score,
-        snippet: hl.hits ? hl.html : hit.snippet,
-      });
-    }
   }
 
   const total = Object.values(groups).reduce((a, g) => a + g.length, 0);
@@ -875,7 +843,7 @@ async function handleChat(req, res) {
   };
 
   try {
-    for await (const ev of runChat(db, CHAT_DIR, { sessionId, message, budget, think, signal: ac.signal, storyDb, obcDb })) {
+    for await (const ev of runChat(db, CHAT_DIR, { sessionId, message, budget, think, signal: ac.signal, obcDb })) {
       if (ac.signal.aborted) break;
       send(ev);
     }
@@ -1269,7 +1237,7 @@ async function handleApi(req, res, url) {
     const type = sp.get('type') || 'all';
     if (!SEARCH_TYPES.has(type)) throw new HttpError(400, 'bad_type', `type 必须是 ${[...SEARCH_TYPES].join(' | ')}`);
     const limit = intParam(sp, 'limit', 20, 1, 100);
-    if (!query) return sendJson(res, { query: '', groups: { character: [], story: [], voice: [], dialogue: [], book: [], storyline: [] }, total: 0 });
+    if (!query) return sendJson(res, { query: '', groups: { character: [], story: [], voice: [], dialogue: [], book: [] }, total: 0 });
     return sendJson(res, doSearch(query, type, limit));
   }
 

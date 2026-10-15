@@ -19,7 +19,6 @@ import { OBC_ICON_KINDS } from './obc-kinds.mjs';
 import { shortNameAtOk } from './names.mjs';
 import { canonicalizeNames } from './nicknames.mjs';
 import { corpusRevision } from './corpus-revision.mjs';
-import { hasStory } from './story-search.mjs';
 
 // kb.sqlite 里 game_id 是**整数** 1（不是 'genshin' 字符串）——
 // 写 'genshin' 会让 characters / books 全部查空。
@@ -33,7 +32,6 @@ export const V1_DOMAINS = [
   { domain: 'voice', label: '角色语音', source: '米游社观测枢', filterable: ['character'] },
   { domain: 'dialogue', label: '剧情台词', source: '米游社观测枢', filterable: ['character', 'chapter', 'questType'] },
   { domain: 'relation', label: '角色关系', source: '米游社观测枢', filterable: ['character'] },
-  { domain: 'storyline', label: '《日月全事》故事线', source: '诗漱《日月全事》第3.1版（侧车库，引用请署名）', filterable: [] },
 ];
 
 const DEC = (v, d) => { try { return v == null ? d : JSON.parse(v); } catch { return d; } };
@@ -61,17 +59,6 @@ export function openV1(dataDir, { writable = true } = {}) {
   const db = new DatabaseSync(path.join(dataDir, 'kb.sqlite'), { readOnly: true });
   const ws = openWorkspace(dataDir, { readonly: !writable });
   const obc = openObc(dataDir);
-  // 故事线要用**独立的只读连接**：hasStory/searchStory 都是直接调 db.prepare()，
-  // 而 Workspace 实例不透出 prepare（server.mjs 也是这么开的，见其第 51 行）。
-  let story = null;
-  try {
-    const p = path.join(dataDir, 'kb-workspace.sqlite');
-    if (fs.existsSync(p)) {
-      const sdb = new DatabaseSync(p, { readOnly: true });
-      story = hasStory(sdb) ? sdb : null;
-      if (!story) sdb.close();
-    }
-  } catch { story = null; }
   const q = (sql, ...p) => db.prepare(sql).all(...p);
   const one = (sql, ...p) => db.prepare(sql).get(...p);
 
@@ -94,10 +81,6 @@ export function openV1(dataDir, { writable = true } = {}) {
       else if (d.domain === 'voice') total = cnt('voice_lines');
       else if (d.domain === 'dialogue') total = cnt('dialogue_groups');
       else if (d.domain === 'relation') total = cnt('relations');
-      else if (d.domain === 'storyline') {
-        // story_* 表在侧车库，不在主库
-        try { total = ws.db.prepare('SELECT COUNT(*) AS c FROM story_acts').get().c; } catch { total = 0; }
-      }
       return { ...d, total };
     });
     return {
@@ -107,7 +90,6 @@ export function openV1(dataDir, { writable = true } = {}) {
       // 数据来源与边界：客户端必须能把它显示给用户
       sources: [
         { name: '米游社观测枢', url: 'https://baike.mihoyo.com/ys/obc/', note: '米哈游自营，角色 / 语音 / 剧情台词 / 书籍 / 图鉴' },
-        { name: '《日月全事》诗漱', url: '', note: '第3.1版·苍星圣敕·至冬史略一；引用请署名，不得商业售卖' },
       ],
       // 尚未替换为公开发布来源的角色（客户端可据此提示用户）
       unreplacedCharacters: q("SELECT name FROM characters WHERE note LIKE '%来源说明（尚未替换）%' ORDER BY name").map((r) => r.name),
@@ -363,9 +345,6 @@ export function openV1(dataDir, { writable = true } = {}) {
     for (const x of q('SELECT name FROM characters WHERE game_id = ?', GID)) list.push({ kind: 'character', domain: 'character', name: x.name });
     for (const x of q('SELECT title FROM books WHERE game_id = ?', GID)) list.push({ kind: 'book', domain: 'book', name: x.title });
     if (obc) for (const x of obc.prepare('SELECT id, name, kind FROM obc_entries').all()) list.push({ kind: 'obc', domain: 'obc:' + x.kind, id: x.id, name: x.name });
-    try {
-      for (const x of ws.db.prepare('SELECT title FROM story_acts').all()) if (x.title) list.push({ kind: 'storyline', domain: 'storyline', name: x.title });
-    } catch { /* 没导故事线 */ }
     // 长的优先：避免「钟」这种单字名乱撞。
     // 但**不能把单字名一律丢掉** —— 主库里有 2 个单字名角色（琴、魈），
     // 丢掉它们会让「琴是谁」被判成「依据较弱」（闸门认为问题里没有具名条目）。
@@ -411,12 +390,11 @@ export function openV1(dataDir, { writable = true } = {}) {
   }
 
   return {
-    db, ws, obc, story,
+    db, ws, obc,
     coverage, query, getRecord, resolveArt, resolveCharacterId, findAnchors,
     listTokens, findToken, tokensPrefix: TK,
     close() {
       try { db.close(); } catch { /* ignore */ }
-      try { if (story) story.close(); } catch { /* ignore */ }
       try { if (obc) obc.close(); } catch { /* ignore */ }
       try { ws.close(); } catch { /* ignore */ }
     },

@@ -101,7 +101,6 @@ try {
     ['preference', '胡桃喜欢吃什么'],
     ['relation', '胡桃和钟离的关系'],
     ['book', '野猪公主讲了什么'],
-    ['storyline', '日月全事里至冬的历史'],
     ['obc', '天空之翼这把武器'],
     ['fts', '往生堂是什么'],
   ];
@@ -114,10 +113,11 @@ try {
     if (types.includes(expectType)) ok(`  ↳ 命中 ${expectType} 分区`, true);
     else console.log(`     （提示：本次未命中 ${expectType}，实际 ${types.join('/')}）`);
   }
-  // 十个检索分区里，至少有 8 个被这套问题触达过
+  // 检索分区里至少有 8 个被这套问题触达过
   ok('检索分区覆盖够广', touched.size >= 8, `触达 ${touched.size} 个：${[...touched].sort().join('/')}`);
 
-  ok('检索回报扫描域（覆盖自检）', (await api('/v1/retrieve', { method: 'POST', body: { question: '胡桃' } })).scannedDomains.length >= 7);
+  // /v1 暴露的知识域数量（V1_DOMAINS）：character / book / obc / voice / dialogue / relation
+  ok('检索回报扫描域（覆盖自检）', (await api('/v1/retrieve', { method: 'POST', body: { question: '胡桃' } })).scannedDomains.length >= 6);
 
   // ------------------------------------------------------------ ②b 多实体
   // 一个长问题里点十来个角色的名：**每一个**都要被抽出并分别检索。

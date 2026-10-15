@@ -140,7 +140,7 @@ let retrieverRevision = 0;
 function getRetriever() {
   requireCorpus();
   if (retrieverRevision !== corpusRevision()) { retriever = null; retrieverRevision = corpusRevision(); }
-  if (!retriever) retriever = createRetriever(v1.db, v1.story, v1.obc);
+  if (!retriever) retriever = createRetriever(v1.db, v1.obc);
   return retriever;
 }
 
@@ -230,8 +230,7 @@ async function routeV1(req, res, url, seg) {
           reason: v1 ? (ready ? '生成服务已连接' : '当前为检索模式') : corpusProblem,
           thinking: resolveThinking(cfg),
           deepThinkDefault: resolveThinking(cfg)?.type === 'enabled',
-          storylineAvailable: !!v1?.story,
-          capabilities: { corpus: !!v1, storyline: !!v1?.story, videoIndex: videoIndex.configured },
+          capabilities: { corpus: !!v1, videoIndex: videoIndex.configured },
         },
       };
     }
@@ -393,7 +392,7 @@ async function routeV1(req, res, url, seg) {
 
     const chatInput = {
       sessionId, message, think, signal: ac.signal,
-      storyDb: v1.story, obcDb: v1.obc, storylineAvailable: !!v1.story,
+      obcDb: v1.obc,
     };
     const it = runChat(v1.db, CHAT_DIR, chatInput);
     try {
@@ -409,7 +408,7 @@ async function routeV1(req, res, url, seg) {
           gate = assessRetrieval({ sources: kept, anchors, coverage });
           send({ type: 'grounding', level: gate.level, reason: gate.reason, refused: gate.refuse, anchors });
           if (gate.refuse) {
-            answer = (!v1.story && /剧情|考据|世界观|设定|权能|神座/.test(message) ? '当前未配置剧情线考据资料。\n\n' : '') + gate.answer;
+            answer = gate.answer;
             send({ type: 'delta', text: answer });
             await it.return();          // 终止生成器，后面的生成一步都不走
             break;

@@ -66,7 +66,7 @@ export async function* runChat(db, dir, input) {
   }
 
   const session = sessionOf(input.sessionId);
-  const retriever = getRetriever(db, input.storyDb, input.obcDb);
+  const retriever = getRetriever(db, input.obcDb);
   const budget = Number.isFinite(input.budget) ? input.budget : DEFAULT_BUDGET;
 
   // ---------------------------------------------------------- 检索
@@ -136,7 +136,6 @@ export async function* runChat(db, dir, input) {
     answer = extractiveAnswer(question, ctx.kept, {
       entities: result.entities,
       coverage: result.coverage,
-      storylineAvailable: input.storylineAvailable !== false,
     });
     const step = 120;
     for (let i = 0; i < answer.length; i += step) {
@@ -155,7 +154,6 @@ export async function* runChat(db, dir, input) {
     const messages = buildMessages(question, ctx.text, session.history, {
       blockHint: input.blockHint,
       coverage: result.coverage,
-      storylineAvailable: input.storylineAvailable !== false,
     });
     for (let li = 0; li < chain.length && !used && !input.signal?.aborted; li++) {
       const link = chain[li];
@@ -254,15 +252,13 @@ export async function* runChat(db, dir, input) {
 }
 
 // retriever 需要 db 才能建索引，按进程缓存一份。
-// storyDb 是侧车库只读连接（《日月全事》故事线），obcDb 也是侧车库（观测枢官方图鉴）。
-// 两者没有时传 null，检索会自动跳过。
-// 缓存键带上两个连接，否则先建的那份会把后来的连接吃掉。
+// obcDb 是侧车库只读连接（观测枢官方图鉴）；没有时传 null，检索会自动跳过。
 let cached = null;
 let cachedKey = '';
-function getRetriever(db, storyDb = null, obcDb = null) {
-  const key = `${storyDb ? 1 : 0}${obcDb ? 1 : 0}:${corpusRevision()}`;
+function getRetriever(db, obcDb = null) {
+  const key = `${obcDb ? 1 : 0}:${corpusRevision()}`;
   if (!cached || cachedKey !== key) {
-    cached = createRetriever(db, storyDb, obcDb);
+    cached = createRetriever(db, obcDb);
     cachedKey = key;
   }
   return cached;

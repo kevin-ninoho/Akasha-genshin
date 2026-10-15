@@ -13,7 +13,6 @@
 import { ENTITY_ALIASES as ALIASES } from '../lib/nicknames.mjs';
 import { shortNameAtOk } from '../lib/names.mjs';
 import { queryExpr, queryExprLoose, stripStopwords } from '../lib/tokenize.mjs';
-import { searchStory, storySourceOf } from '../lib/story-search.mjs';
 import { searchObc, obcSourceOf, searchObcByName } from '../lib/obc-search.mjs';
 // 观测枢分类知识（哪些域主库没有、什么问法放开哪个域）只此一处，见 lib/obc-kinds.mjs。
 import { OBC_ONLY_KINDS, OBC_GEAR_ASK_RE, pickObcKinds } from '../lib/obc-kinds.mjs';
@@ -110,7 +109,7 @@ function pickByKeyword(rows, keywords, limit, titleOf, bodyOf) {
   return chosen.map((x) => x.row);
 }
 
-export function createRetriever(db, storyDb = null, obcDb = null) {
+export function createRetriever(db, obcDb = null) {
   const all = (sql, ...p) => db.prepare(sql).all(...p);
   const one = (sql, ...p) => db.prepare(sql).get(...p);
 
@@ -132,7 +131,7 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
     if (!k) return;
     // 单字名（琴、魈）在中文里到处都是 —— 「风琴」「弹琴」「琴声」。
     // 以前一律拒收长度 <2 的键，结果是**琴这个角色永远识别不出来**：
-    // 问「琴是谁」走了纯 FTS，撞出一堆《日月全事》和随机 NPC，一条琴的资料都没有。
+    // 问「琴是谁」走了纯 FTS，撞出一堆随机 NPC，一条琴的资料都没有。
     // 现在收进来，但只收**真名本身**（拼音/英文名不参与单字匹配），
     // 并且匹配时要求出现在句首或前面不是汉字（见 detectEntities）。
     if (k.length < 2 && !SHORT_NAMES.has(k) && !ALIASES[k]) return;
@@ -207,7 +206,7 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
     for (const [scope, words] of SCOPE_HINTS) {
       if (words.some((w) => lc.includes(norm(w)))) scopes.push(scope);
     }
-    if (LORE_RE.test(text)) scopes.push('story', 'dialogue', 'storyline');
+    if (LORE_RE.test(text)) scopes.push('story', 'dialogue');
     if (!scopes.length) {
       // 没提分区：有角色就默认给档案 + 故事 + 好恶；没角色就走全文检索
       return hasEntity ? ['profile', 'story', 'preference'] : ['all'];
@@ -405,10 +404,13 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
 
     const goal = Math.min(limit, 3);
     let rows = [];
+    // 阶梯由精确到宽松。某一档达到 goal 就**采用并停止**，不能因为后面更宽的一档条数
+    // 更多就把它换掉 —— 那等于拿「召回多」冒充「召回准」。「神之眼是什么」曾因此
+    // 从 200 条精确命中被替换成近 4000 条噪音。各档都不达标时，才退而取最全的一档。
     for (const expr of cands) {
       const got = ftsRows(expr, limit);
+      if (got.length >= goal) { rows = got; break; }
       if (got.length > rows.length) rows = got;
-      if (got.length >= goal) break;
     }
     if (!rows.length) return [];
     const out = [];
@@ -463,18 +465,6 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
     return out.map(s => ({ ...s, retrieval: 'fts' }));
   }
 
-  /**
-   * 《日月全事》故事线（侧车库 story_* 表）。
-   * 主库 search_fts 里没有它，所以结构化分区和全文兜底都碰不到 —— 单独补一层。
-   * storyDb 为 null（没导入故事线）时安静返回空数组。
-   */
-  function storylineSources(question, keywords, limit) {
-    if (!storyDb) return [];
-    let hits = [];
-    try { hits = searchStory(storyDb, question, limit, keywords); } catch { hits = []; }
-    return hits.map((h) => storySourceOf(h));
-  }
-
   function loreDialogueSources(question, entities, terms) {
     if (!terms.length) return [];
     const ids = entities.filter(e => typeof e.id === 'number').map(e => e.id);
@@ -495,26 +485,10 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
     });
   }
 
-  function loreStorylineSources(question, entities, terms) {
-    if (!storyDb) return [];
-    if (!terms.length) return storylineSources(question, entities.map(e=>e.name), 2);
-    const names = [...new Set(entities.map(e => e.matched === '(承接上文)' ? e.name : e.matched || e.name))];
-    const rows = new Map();
-    for (const term of [...names,...terms].filter(t => t.length >= 2)) {
-      try { for (const a of storyDb.prepare('SELECT id,title,full,page_label FROM story_acts WHERE title LIKE ? OR full LIKE ? LIMIT 15').all(`%${term}%`,`%${term}%`)) rows.set(a.id,a); } catch { /* optional */ }
-    }
-    const ranked=[...rows.values()].map(a=>({...a,rank:names.reduce((n,t)=>n+(a.title.includes(t)?28:a.full.includes(t)?8:0),0)+terms.reduce((n,t)=>n+(a.full.includes(t)?2:0),0)})).sort((a,b)=>b.rank-a.rank);
-    return ranked.slice(0,2).map(a=>{
-      const sentences=a.full.split(/(?<=[。！？])/);const pieces=sentences.map((s,i)=>({s,i,rank:terms.reduce((n,t)=>n+(s.includes(t)?Math.min(t.length,6):0),0)+names.reduce((n,t)=>n+(s.includes(t)?2:0),0)})).sort((a,b)=>b.rank-a.rank).filter(s=>s.rank>0).slice(0,9).sort((a,b)=>a.i-b.i);
-      return {type:'storyline',actId:a.id,sourceId:`storyline:${a.id}`,title:`《日月全事》· ${a.title}（诗漱考据）`,pages:a.page_label,text:clip(pieces.map(x=>x.s).join('\n'),1500),authority:'research'};
-    });
-  }
-
   /**
    * 观测枢官方图鉴（侧车库 obc_* 表）。同样是主库 FTS 碰不到的一块。
    *
-   * 与故事线的差别：故事线是长文考据，只在宽问题时补，硬塞会稀释资料；
-   * 但**武器 / 圣遗物 / 材料 / 食物 / 敌人这几类主库里压根没有**，
+   * **武器 / 圣遗物 / 材料 / 食物 / 敌人这几类主库里压根没有**，
    * 所以问到就该给，不然 AI 只能回答「知识库里没有」。
    */
   function obcSources(question, limit, opts = {}) {
@@ -558,7 +532,8 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
       }
     }
     const scopes = detectScopes(question, entities.length > 0);
-    const lore = scopes.includes('storyline');
+    // 「考据型」问题：额外补一层官方剧情对白（loreDialogueSources）。
+    const lore = LORE_RE.test(question);
     const concepts = lore ? loreTerms(question, entities) : [];
 
     // 检索关键词：原问题去掉标点后切词，供分区内打分
@@ -601,7 +576,6 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
 
     if (lore) {
       push(loreDialogueSources(question, entities, concepts));
-      push(loreStorylineSources(question, entities, concepts));
     }
 
     // ① 观测枢「名称直配」**排在最前**。
@@ -663,16 +637,6 @@ export function createRetriever(db, storyDb = null, obcDb = null) {
         ownerIds: entities.map((e) => e.id),
         names: entities.map((e) => e.name),
       }));
-    }
-
-    // 《日月全事》故事线（侧车库）：它是连续时间轴的长文考据，在问世界观/历史/诸神
-    // 这类「宽问题」时最有价值 —— 官方碎片里往往拼不出来。
-    // 反过来，问「胡桃是谁」这种已经锁定到具体角色的问题时不补：结构化分区已经够用，
-    // 硬塞考据长文只会稀释资料（实测会把「制作人员与鸣谢」也带进来）。
-    // 例外：问题里点名了这本书，那就一定要给。
-    const asksBook = /日月全事|日月前事|时间线|编年史|考据/.test(question);
-    if (!lore && (entities.length === 0 || scopes.includes('all') || asksBook)) {
-      push(storylineSources(question, keywords, entities.length === 0 ? 6 : 4));
     }
 
     // ③ 观测枢官方图鉴（侧车库 obc_* 表）。

@@ -7,7 +7,8 @@ export const DEFAULT_RANGES=[[1,9000],[500000,512000]];
 function ensureObcSchema(db) {
  db.exec(`CREATE TABLE IF NOT EXISTS obc_entries(id INTEGER PRIMARY KEY,menu_id INTEGER,menu_label TEXT,kind TEXT,name TEXT,license TEXT,module_count INTEGER,text_len INTEGER,updated_at TEXT,raw_json TEXT);
  CREATE VIRTUAL TABLE IF NOT EXISTS obc_fts USING fts5(name,grams,kind UNINDEXED,entry_id UNINDEXED);
- CREATE INDEX IF NOT EXISTS idx_obc_kind ON obc_entries(kind);`);
+ CREATE INDEX IF NOT EXISTS idx_obc_kind ON obc_entries(kind);
+ CREATE INDEX IF NOT EXISTS obc_entries_name1 ON obc_entries(substr(name,1,1));`);
 }
 const API='https://api-takumi-static.mihoyo.com/hoyowiki/genshin';
 const read=(p,d)=>{try{return JSON.parse(fs.readFileSync(p,'utf8'))}catch{return d}};

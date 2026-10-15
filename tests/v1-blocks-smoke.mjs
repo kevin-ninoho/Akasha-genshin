@@ -58,26 +58,18 @@ const ROUTE_CASES = [
   ['胡桃的培养材料', 'ascension'],
   ['璃月有哪些角色', 'list'],
   ['一共有多少角色', 'list'],
-  ['故事线的时间顺序', 'timeline'],
-  ['剧情脉络是怎样的', 'timeline'],
-  ['提瓦特的历史', 'timeline'],
 ];
 for (const [q, want] of ROUTE_CASES) {
   const r = routeIntents(q);
   ok(`「${q}」→ ${want}`, r.intents.includes(want), `实际=${r.intents.join(',') || '(无)'}`);
 }
 
-// timeline 的触发词曾经是裸的 /历史/ —— 太宽：问「胡桃的历史」「这个角色的历史」
-// 也会命中，于是用户问角色，界面却端出一张《日月全事》世界时间轴（实测报过）。
-// 现在只有「世界/地区 + 历史」或「历史 + 脉络类词」才算在问编年。
-for (const q of ['历史', '胡桃的历史', '钟离的历史', '这个角色的历史', '胡桃的历史背景']) {
+// timeline 意图已随《日月全事》故事线移除：任何问法都不该再命中它。
+for (const q of ['历史', '胡桃的历史', '钟离的历史', '这个角色的历史', '胡桃的历史背景',
+                 '故事的历史脉络', '蒙德的历史', '故事线的时间顺序', '编年史']) {
   const r = routeIntents(q);
-  ok(`「${q}」不命中 timeline（避免端出世界时间轴）`, !r.intents.includes('timeline'), r.intents.join(',') || '(无)');
+  ok(`「${q}」不命中 timeline（该意图已移除）`, !r.intents.includes('timeline'), r.intents.join(',') || '(无)');
 }
-ok('「历史脉络」命中 timeline', routeIntents('故事的历史脉络').intents.includes('timeline'),
-  routeIntents('故事的历史脉络').intents.join(','));
-ok('「蒙德的历史」命中 timeline（地区 + 历史）', routeIntents('蒙德的历史').intents.includes('timeline'),
-  routeIntents('蒙德的历史').intents.join(','));
 
 // 一条问题命中多个意图：两个都要在，且 art 优先于 voice（声明序即优先级）
 {
@@ -118,7 +110,7 @@ const build = (q) => buildBlocks({ v1, question: q, anchors: v1.findAnchors(q), 
 const kindsOf = (bs) => bs.map((b) => b.kind);
 const one = (q, kind) => build(q).find((b) => b.kind === kind);
 
-ok('BLOCK_KINDS 覆盖全部十种', BLOCK_KINDS.length === 10 && BLOCK_KINDS.includes('video-scenes'), BLOCK_KINDS.join(','));
+ok('BLOCK_KINDS 覆盖全部九种', BLOCK_KINDS.length === 9 && BLOCK_KINDS.includes('video-scenes'), BLOCK_KINDS.join(','));
 
 // ① image
 {
@@ -209,15 +201,10 @@ ok('BLOCK_KINDS 覆盖全部十种', BLOCK_KINDS.length === 10 && BLOCK_KINDS.in
     !!o && /敌人/.test(o.title) && /417/.test(o.title), o && o.title);
 }
 
-// ⑥ timeline
+// ⑥ timeline 已随《日月全事》故事线一并移除 —— 这里断言它不再产出块
 {
   const b = one('故事线的时间顺序', 'timeline');
-  ok('timeline 能造出来', !!b, b && b.title);
-  ok('timeline 的 items 有序号感（era/page/title 都在）',
-    !!b && b.items.length > 0 && b.items.every((i) => i.title && typeof i.era === 'string'),
-    b && `${b.items.length} 项`);
-  ok('timeline 标注了出处（诗漱《日月全事》）',
-    !!b && /诗漱|日月全事/.test(b.source || ''), b && b.source);
+  ok('timeline 块已移除（不再返回任何块）', !b, b && b.title);
 }
 
 // ⑦ talent（天赋 + 倍率表）

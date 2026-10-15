@@ -29,7 +29,7 @@ export function openObc(dataDir, { readonly = true } = {}) {
   }
 }
 
-/** 表存在且非空才算有数据（与 hasStory 同一套思路） */
+/** 表存在且非空才算有数据 */
 export function hasObc(db) {
   try {
     const r = db.prepare(

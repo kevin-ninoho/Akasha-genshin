@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { buildMessages } from '../engine/chat/prompt.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'akasha-capabilities-'));
@@ -21,21 +20,18 @@ let count = 0; const ok = name => { count++; console.log('PASS ' + name); };
 try {
   let up = false; for (let i = 0; i < 100; i++) { try { up = (await fetch(base + '/v1/health')).ok; } catch {} if (up) break; await new Promise(r => setTimeout(r, 50)); } assert.ok(up);
   const status = await (await fetch(base + '/v1/status', { headers })).json();
-  assert.equal(status.capabilities.corpus, true); assert.equal(status.storylineAvailable, false); assert.equal(status.provider, 'extractive');
-  ok('corpus works while absent local model and storyline are explicitly reported');
+  assert.equal(status.capabilities.corpus, true); assert.equal(status.provider, 'extractive');
+  ok('corpus works while absent local model is explicitly reported');
   const response = await fetch(base + '/v1/chat', { method: 'POST', headers, body: JSON.stringify({ message: '测试角色的剧情故事', sessionId: 'synthetic' }) });
   assert.equal(response.status, 200); const text = await response.text();
   const events = text.split('\n').filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)));
   const done = events.find(event => event.type === 'done');
   assert.equal(done.provider, 'extractive'); assert.equal(done.failed, false); assert.ok(done.answer.trim());
-  assert.match(done.answer, /当前未配置剧情线考据资料/); assert.match(done.answer, /测试角色/);
+  assert.match(done.answer, /测试角色/);
   assert.ok(events.find(event => event.type === 'sources').sources.length);
-  ok('no-model mode preserves actual retrieval, citations and a storyline capability notice');
+  ok('no-model mode preserves actual retrieval and citations');
   const sequence = ['meta', 'sources', 'grounding', 'blocks', 'provider', 'audit', 'done', 'eof'];
   let previous = -1; for (const type of sequence) { const position = events.findIndex(event => event.type === type); assert.ok(position > previous, type); previous = position; }
   ok('normal SSE keeps the declared source/block/audit order');
-  const messages = buildMessages('剧情考据', 'synthetic evidence', [], { storylineAvailable: false });
-  assert.match(messages[0].content, /当前未配置剧情线考据资料/);
-  ok('model prompt distinguishes unavailable storyline data from missing knowledge');
   console.log(`Result: ${count}/${count} passed`);
 } finally { child.kill(); await new Promise(resolve => child.exitCode !== null ? resolve() : child.once('exit', resolve)); fs.rmSync(temp, { recursive: true, force: true }); }

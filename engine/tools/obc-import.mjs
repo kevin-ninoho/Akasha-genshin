@@ -84,6 +84,9 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS obc_entries_menu ON obc_entries(menu_id);
   CREATE INDEX IF NOT EXISTS obc_entries_kind ON obc_entries(kind);
+  -- 名称直配（obc-search.mjs 的 byName）按「名字首字是否出现在问句里」预筛，
+  -- 这个表达式索引把该查询从全表扫描（~36 ms）降到索引查找（~0.04 ms）。
+  CREATE INDEX IF NOT EXISTS obc_entries_name1 ON obc_entries(substr(name,1,1));
 
   CREATE VIRTUAL TABLE IF NOT EXISTS obc_fts USING fts5(
     name, grams, kind UNINDEXED, entry_id UNINDEXED, tokenize='unicode61'

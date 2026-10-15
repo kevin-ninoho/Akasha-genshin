@@ -1,11 +1,10 @@
 // 观测枢官方数据（obc_*）的检索层。
 //
 // 为什么单独一层：obc_* 在**侧车库**，主库 search_fts 里没有它，
-// 结构化分区（角色档案/故事/语音）和全文兜底都碰不到 —— 和《日月全事》故事线是同一个情况。
+// 结构化分区（角色档案/故事/语音）和全文兜底都碰不到。
 //
-// 与 story-search 的区别：故事线只在「宽问题」时补（它是长文考据，硬塞会稀释资料）；
 // 观测枢这边**武器 / 圣遗物 / 材料 / 食物 / 敌人这几类是主库完全没有的**，
-// 所以只要问到了就该给。
+// 所以只要问到了就该给 —— 不给，AI 只能回答「知识库里没有」。
 //
 // 检索策略（两层，缺一不可）：
 //   ① 名称直配 —— 只扫轻量名称，问句命中后按上限读取对应正文。
@@ -52,9 +51,16 @@ function byName(db, question, limit, kinds, opts = {}) {
   const k = kindClause(kinds);
   let rows = [];
   try {
-    // raw_json contains the complete page, including nested rich text. Loading
-    // every page here costs hundreds of MiB even for a single short question.
-    rows = db.prepare(`SELECT e.id, e.name FROM obc_entries e WHERE 1=1${k.sql}`).all(...k.params);
+    // 名称直配只会命中「问句里出现过的名字」，所以该名字的**首字必然出现在问句里**。
+    // 用这一点把候选从全表 16870 行收窄到几十行。不收窄的话每次提问都要全表扫描
+    // 再在 JS 里过滤（实测 ~50 ms 稳态 / ~2 s 冷启动），而真正命中的通常只有 1~2 条。
+    // 注意 substr 对 TEXT 是按**字符**取，不是字节，中文首字可以安全用于比较。
+    const firstChars = [...new Set(Array.from(q))];
+    if (!firstChars.length) return [];
+    const ph = firstChars.map(() => '?').join(',');
+    rows = db.prepare(
+      `SELECT e.id, e.name FROM obc_entries e WHERE 1=1${k.sql} AND substr(e.name,1,1) IN (${ph})`,
+    ).all(...k.params, ...firstChars);
   } catch { return []; }
   // 默认只认长度 ≥2 的名字：单字名（琴、魈…）在中文里到处都是
   // （「风琴」「弹琴」「琴声」），放进来会到处误命中。
@@ -108,6 +114,7 @@ function byFts(db, question, limit, kinds) {
   const k = kindClause(kinds);
   let best = [];
   const goal = Math.min(limit, 3);
+  // 同上（见 chat/retrieve.mjs 的 ftsSources）：达标即停，不被更宽的一档用条数顶掉。
   for (const expr of cands) {
     let rows = [];
     try {
@@ -118,8 +125,8 @@ function byFts(db, question, limit, kinds) {
           ORDER BY score LIMIT ?`,
       ).all(expr, ...k.params, limit);
     } catch { rows = []; }
+    if (rows.length >= goal) { best = rows; break; }
     if (rows.length > best.length) best = rows;
-    if (best.length >= goal) break;
   }
   return best;
 }

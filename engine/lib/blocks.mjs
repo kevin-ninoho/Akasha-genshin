@@ -24,7 +24,7 @@ import { canonicalizeNames } from './nicknames.mjs';
 
 /** 六种块。客户端按 kind 分派渲染器。 */
 export const BLOCK_KINDS = [
-  'image', 'voice-list', 'relation-graph', 'stat-table', 'list', 'timeline',
+  'image', 'voice-list', 'relation-graph', 'stat-table', 'list',
   'talent', 'constellation', 'ascension',
   'video-scenes',
 ];
@@ -43,7 +43,6 @@ const LIMIT = {
   relationNodes: 24,
   statSlots: 3, statRows: 6,
   listRows: 20,
-  timelineItems: 14,
   talentMultiplierRows: 12,
   ascensionStages: 6,
 };
@@ -68,14 +67,6 @@ const RULES = [
   { id: 'weapon', re: [/武器/, /用什么剑/, /用什么枪/, /带什么/, /适合.*(武器|装备)/] },
   { id: 'artifact', re: [/圣遗物/, /套装/, /词条/, /沙漏/, /杯子/, /头冠/] },
   { id: 'build', re: [/配装/, /培养/, /怎么练/, /配队/, /阵容/, /搭配/, /推荐/, /面板/, /数值/, /属性/] },
-  // 时间轴只出《日月全事》那一条（世界观编年）。
-  //
-  // ⚠ 这里**不能**写成 /历史/：问「胡桃的历史」「这个角色的历史」也会命中，
-  //   于是用户问角色，界面却端出一张《日月全事》世界时间轴（实测报过）。
-  //   只有「世界/地区 + 历史」或「历史 + 脉络类词」才算真的在问编年。
-  { id: 'timeline', re: [/时间线/, /时间轴/, /年表/, /编年/, /顺序/, /先后/, /剧情.*脉络/, /故事线/,
-    /历史(线|脉络|年表|时间轴|沿革|进程)/,
-    /(提瓦特|大陆|世界|七国|诸神|原神|游戏|蒙德|璃月|稻妻|须弥|枫丹|纳塔|至冬|坎瑞亚|天空岛)(的)?历史/] },
   { id: 'list', re: [/有哪些/, /都有谁/, /一共.*(多少|几)/, /多少个/, /多少位/, /多少把/, /列表/, /全部/, /所有/, /列举/, /盘点/, /清单/] },
 ];
 
@@ -448,30 +439,6 @@ function buildList(v1, question) {
   return null;
 }
 
-/** ⑥ 时间轴：《日月全事》故事线（侧车库）。 */
-function buildTimeline(v1, question) {
-  try {
-    if (!v1.ws || !v1.ws.db) return null;
-    const rows = v1.ws.db.prepare(
-      'SELECT era_id, title, page_label, excerpt FROM story_acts ORDER BY page ASC LIMIT ?',
-    ).all(LIMIT.timelineItems);
-    if (!rows.length) return null;
-    const items = rows.map((r) => ({
-      era: r.era_id || '',
-      title: r.title || '',
-      page: r.page_label || '',
-      excerpt: cut(r.excerpt, 120),
-    }));
-    return {
-      kind: 'timeline',
-      title: '《日月全事》故事线',
-      total: items.length,
-      items,
-      source: '诗漱《日月全事》第3.1版（引用请署名）',
-    };
-  } catch { return null; }
-}
-
 // ------------------------------------------------------------------ 对外入口
 
 /**
@@ -506,7 +473,7 @@ export function buildBlocks({ v1, question, anchors = [], entities = [], videoIn
   //   结果用户问「胡桃的推荐武器」，收到的是胡桃立绘 + 一堆武器名字，
   //   直接反馈「不要把立绘给我，问什么给什么，不多不少」。
   const ASPECT_INTENTS = ['weapon', 'artifact', 'build', 'talent', 'constellation',
-    'ascension', 'voice', 'relation', 'timeline'];
+    'ascension', 'voice', 'relation'];
   const aspectAsk = routed.intents.some((i) => ASPECT_INTENTS.includes(i));
   if (char && !routed.intents.includes('art') && !aspectAsk) {
     try {
@@ -546,7 +513,6 @@ export function buildBlocks({ v1, question, anchors = [], entities = [], videoIn
       else if (intent === 'constellation') block = buildConstellation(v1, char);
       else if (intent === 'ascension') block = buildAscension(v1, char);
       else if (intent === 'list') block = buildList(v1, question);
-      else if (intent === 'timeline') block = buildTimeline(v1, question);
       else if (intent === 'video' && videoIndex?.configured) {
         const name = char?.row?.name || entities.find(e => e.name)?.name || '';
         const items = [...videoIndex.entries.entries()]
@@ -597,7 +563,6 @@ export function blockHintForPrompt(blocks, question = '') {
     if (b.kind === 'constellation') return `命之座（${b.title}）：${b.total} 个命座已展示`;
     if (b.kind === 'ascension') return `培养材料表（${b.title}）：${b.total} 个突破阶段的材料已展示`;
     if (b.kind === 'list') return `列表（${b.title}）：共 ${b.total} 条，已用表格展示`;
-    if (b.kind === 'timeline') return `时间轴（${b.title}）：已按顺序展示`;
     return b.title;
   });
   const videoListOnly = blocks.some(b=>b.kind==='video-scenes') && question && !/为什么|为何|因果|背景|剧情|解释|分析|区别|意义|怎么|如何/.test(question);
