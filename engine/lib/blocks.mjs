@@ -20,6 +20,8 @@ import { parseEntryModules } from './obc-modules.mjs';
 // lib/obc-kinds.mjs —— 块这边原先各有一份副本（OBC_KINDS / OBC_KIND_LABEL_CN），
 // 补采后 menu 从 7 涨到 53，副本一过期标签就变成英文 slug。
 import { OBC_PICK_KINDS, OBC_ICON_KINDS, OBC_DOMAIN_TRIGGERS, obcLabel } from './obc-kinds.mjs';
+// 观测枢原文地址（回链官方来源；obc.mjs 不反向依赖本文件，无循环）
+import { obcSourceUrl } from './obc.mjs';
 import { canonicalizeNames } from './nicknames.mjs';
 
 /** 六种块。客户端按 kind 分派渲染器。 */
@@ -241,6 +243,9 @@ function buildStat(v1, char, slotFilter = null) {
     ['元素', r.element], ['武器', r.weapon], ['稀有度', r.rarity ? `${r.rarity}★` : ''],
     ['命之座', r.constellation], ['所属', r.faction], ['地区', r.region],
     ['生日', r.birthday], ['CV', r.cv_cn],
+    // 「定位」（如「爆发型输出角色」）来自观测枢角色页。构建器此前读的是语料里
+    // 并不存在的「身份」字段，整列被丢弃 —— 这里也就一直没有这一项。
+    ['定位', r.role],
   ].filter(([, v]) => v).map(([k, v]) => ({ k, v: String(v) }));
 
   const tables = [];
@@ -289,19 +294,49 @@ function buildStat(v1, char, slotFilter = null) {
     }
   } catch { /* 观测枢推荐缺失不影响档案 */ }
 
-  if (!profile.length && !tables.length) return null;
+  // 档案为空壳时的说明。
+  //
+  // 观测枢只收「可玩角色 / 形态」页，所以派蒙、戴因斯雷布、愚人众执行官这些角色
+  // **没有独立角色页** —— 那是源头限制，不是我们没做全。
+  // 直接端一张空表（或者干脆不出块）会让用户以为产品不全，考据党尤其在意
+  // 「派蒙怎么没有档案」。所以要如实说明，并把他指到真正有资料的地方：台词。
+  //
+  // ⚠ 顺序要紧：这段必须在下面那个 return null **之前**算完。
+  //   否则档案为空（profile.length === 0）的角色会先被判成「没内容」直接丢块，
+  //   最需要解释的那几个反而什么都不显示。
+  const thin = profile.length < 4;
+  let incompleteNote = '';
+  if (thin) {
+    let lines = 0;
+    try {
+      lines = v1.db.prepare(
+        'SELECT COUNT(*) AS c FROM dialogue_lines l JOIN dialogue_groups g ON g.id = l.group_id WHERE g.character_id = ?',
+      ).get(r.id)?.c || 0;
+    } catch { /* 台词统计失败不影响档案 */ }
+    // 措辞保持「永远为真」：不猜它是剧情角色还是形态分页。
+    // 旅行者是可玩的，只是观测枢按元素形态分页，说成「剧情角色」就不准。
+    incompleteNote = r.obc_id
+      ? `米游社观测枢该词条仅发布了 ${profile.length} 项档案字段。`
+      : `米游社观测枢未收录「${r.name}」的独立角色页，因此没有可引用的角色档案。`;
+    if (lines) incompleteNote += `本库已收录其剧情台词 ${lines} 条，可直接检索。`;
+  }
+
+  if (!profile.length && !tables.length && !incompleteNote) return null;
   const only = slotFilter || '';
   // 指定了具体方面（「推荐武器」「推荐圣遗物」）时就**不带档案**。
-  // 档案（元素/武器类型/生日/CV/命座…）是"这个角色是谁"的内容，
-  // 用户明确问武器时把生日和 CV 一起端出来就是"多给了"。
-  // 早先的理由是"档案只有 8 项不占地方"，那是从**体积**考虑的；
-  // 用户的诉求是**贴题**，不是省地方。
+  // 档案（元素/武器类型/生日/CV/命座…）是「这个角色是谁」的内容，
+  // 用户明确问武器时把生日和 CV 一起端出来就是「多给了」。
   // 问「配装」这种笼统的（slotFilter 为空）仍然带 —— 那时角色概览本身就是上下文。
   return {
     kind: 'stat-table',
     title: `${r.name} · ${only || '数据与配装'}`,
     profile: slotFilter ? [] : profile,
     tables,
+    // 让前端把「档案不完整」如实显示出来，而不是留一张空表
+    incomplete: !slotFilter && thin,
+    note: slotFilter ? '' : incompleteNote,
+    // 观测枢原文地址：档案取自官方，就该让用户能回官方核对
+    sourceUrl: obcSourceUrl(r.obc_id),
     source: tables.length ? '米游社观测枢' : '',
   };
 }

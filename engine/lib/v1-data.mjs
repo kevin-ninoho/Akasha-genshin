@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openWorkspace } from './workspace.mjs';
-import { openObc, obcList, obcEntry, obcStats, obcLabel } from './obc.mjs';
+import { openObc, obcList, obcEntry, obcStats, obcLabel, obcSourceUrl } from './obc.mjs';
 import { OBC_ICON_KINDS } from './obc-kinds.mjs';
 import { shortNameAtOk } from './names.mjs';
 import { canonicalizeNames } from './nicknames.mjs';
@@ -155,6 +155,7 @@ export function openV1(dataDir, { writable = true } = {}) {
         items: res.items.map((it) => ({
           id: it.id, name: it.name, kind: it.kind, label: it.label, menuLabel: it.menuLabel,
           chars: it.chars, snippet: it.snippet || '', url: `/obc.html#e${it.id}`,
+        sourceUrl: it.sourceUrl || obcSourceUrl(it.id),
         })),
       };
     }
@@ -194,12 +195,33 @@ export function openV1(dataDir, { writable = true } = {}) {
 
   // ---------------------------------------------------------------- 条目形状
 
+  // 「基础档案」的核心字段。用来判断一个角色的档案是不是空壳。
+  const PROFILE_CORE = ['title', 'faction', 'region', 'constellation', 'element',
+    'weapon', 'rarity', 'birthday', 'cv_cn', 'release_date', 'role'];
+
   function characterCard(r) {
+    const filledCore = PROFILE_CORE.reduce((n, k) => {
+      const v = r[k];
+      return n + (v !== null && v !== undefined && v !== '' ? 1 : 0);
+    }, 0);
     return {
       id: r.id, name: r.name, enName: r.en_name || '', pinyin: r.pinyin || '',
       title: r.title || '', identity: r.identity || '', faction: r.faction || '',
       region: r.region || '', constellation: r.constellation || '',
       element: r.element || '', weapon: r.weapon || '', rarity: r.rarity || null,
+      // 观测枢角色页的「定位」，如「爆发型输出角色」。此前因字段名对不上整列丢失。
+      role: r.role || '',
+      // 词条 id 与观测枢原文地址：让用户能回官方核对，而不是只能看我们的转述。
+      obcId: r.obc_id || null,
+      sourceUrl: obcSourceUrl(r.obc_id),
+      // 档案是否为空壳。两个信号：
+      //   ① 观测枢没有对应角色词条（obcId 为空）—— 这是**源头限制**，
+      //      观测枢只收可玩角色，派蒙/戴因斯雷布/愚人众执行官都没有角色页；
+      //   ② 词条在、但核心字段少得异常。
+      // 客户端据此显示「观测枢未收录其档案，但台词已收录 N 条」，而不是甩一张空表 ——
+      // 空表会让用户以为是我们没做全。
+      profileIncomplete: !r.obc_id || filledCore < 4,
+      profileFields: filledCore,
       birthday: r.birthday || '', cv: r.cv_cn || '', releaseDate: r.release_date || '',
       unreplaced: /来源说明（尚未替换）/.test(r.note || ''),
       art: {
@@ -278,7 +300,7 @@ export function openV1(dataDir, { writable = true } = {}) {
     if (kind === 'obc') {
       const e = obcEntry(obc, n);
       if (!e) return null;
-      return { id: e.id, name: e.name, kind: e.kind, label: e.label, menuLabel: e.menuLabel, text: e.text.replace(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/gi,''), url: `/obc.html#e${e.id}` };
+      return { id: e.id, name: e.name, kind: e.kind, label: e.label, menuLabel: e.menuLabel, text: e.text.replace(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/gi,''), url: `/obc.html#e${e.id}`, sourceUrl: obcSourceUrl(e.id) };
     }
     return null;
   }

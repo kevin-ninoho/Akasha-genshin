@@ -54,6 +54,25 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  /**
+   * 观测枢原文外链。
+   *
+   * 为什么要有：本产品的资料取自米游社观测枢（米哈游自营）。如果只吸收、不把用户
+   * 送回官方来源，形态上就是「替代官方来源」—— 米哈游诉「游创工坊」一案的判决书
+   * 正是以「导致《原神》用户流量有所减少」「产生了一定的替代效果」作为认定理由之一。
+   * 所以每个能定位到官方词条的地方都要给出回链。
+   *
+   * 域名做白名单：只放行观测枢。后端数据异常时不会把用户带去别处。
+   * 与「引用 chip 不可点」的既有约定不冲突 —— 那是禁止暴露本机知识库界面，
+   * 这里是官方外链，性质相反。
+   */
+  function obsSourceLink(url, label) {
+    var u = String(url || '');
+    if (!/^https:\/\/baike\.mihoyo\.com\//.test(u)) return '';
+    return '<a class="src-go" href="' + esc(u) + '" target="_blank" rel="noopener noreferrer"' +
+      ' title="在米游社观测枢查看该条目原文">' + esc(label || '观测枢原文↗') + '</a>';
+  }
+
   function uid() {
     return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   }
@@ -324,12 +343,18 @@
     var kv = (b.profile || []).map(function (p) {
       return '<div><b>' + esc(p.k) + '</b><span>' + esc(p.v) + '</span></div>';
     }).join('');
+    // 档案不完整时如实说明。观测枢只收「可玩角色」页，所以派蒙、戴因斯雷布、
+    // 愚人众执行官这些剧情角色**源头就没有角色档案** —— 端一张空表会让用户
+    // 以为是我们没做全（考据党尤其在意「派蒙怎么没有档案」）。
+    var warn = b.incomplete && b.note
+      ? '<div class="blk-warn">' + esc(b.note) + '</div>' : '';
     var tables = (b.tables || []).map(function (t) {
       return '<div class="blk-slot"><h4>' + esc(t.slot) +
         '<span class="cnt">共 ' + t.total + ' 条' + (t.truncated ? '，此处前 ' + t.rows.length + ' 条' : '') + '</span></h4>' +
         tableHtml(t.columns, t.rows) + '</div>';
     }).join('');
-    return (kv ? '<div class="blk-kv">' + kv + '</div>' : '') + tables;
+    return warn + (kv ? '<div class="blk-kv">' + kv + '</div>' : '') + tables +
+      obsSourceLink(b.sourceUrl, '该角色在观测枢的原条目↗');
   }
 
   function blockList(b) {
@@ -433,10 +458,17 @@
       //
       // 现在把这个分支整个删掉：客户端里不再存在"能渲染出知识库链接"的代码。
       // 原文本来就在 chip 的悬停提示里（tip），要看整条用浏览器开 5178。
+      //
+      // ── 例外：观测枢原文外链 ──────────────────────────────────────────
+      // 这是**官方来源的外链**，和上面删掉的「知识库本体链接」不是一回事：
+      // 它不暴露任何本机服务，而且「把用户送回官方来源」正是我们要的形态 ——
+      // 只吸收、不送回，会被读成替代官方来源（见 engine/lib/obc.mjs 顶部的判例说明）。
+      // 域名做白名单：只放行观测枢，后端数据异常时不会把用户带去别处。
       sources = '<div class="sources"><span class="lbl">引用</span>' + m.sources.map(function (s) {
         var tip = String(s.text || '').replace(/\s+/g, ' ').slice(0, 160);
         var inner = '<em>[' + esc(s.ref) + ']</em><span>' + esc(s.title) + '</span>';
-        return '<span class="src src-plain" title="' + esc(tip) + '">' + inner + '</span>';
+        var chip = '<span class="src src-plain" title="' + esc(tip) + '">' + inner + '</span>';
+        return chip + obsSourceLink(s.sourceUrl, '原文↗');
       }).join('') + '</div>';
     }
 

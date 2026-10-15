@@ -17,6 +17,33 @@ import { queryExpr, snippet } from './tokenize.mjs';
 import { obcLabel, OBC_KIND_LABEL } from './obc-kinds.mjs';
 export { OBC_KIND_LABEL, obcLabel };
 
+// ------------------------------------------------------------------ 官方原文回链
+//
+// 为什么必须回链：观测枢是米哈游自营的官方资料站。本产品把它的内容整理成可检索的
+// 形态，如果**只吸收、不送回**，形态上就成了「替代官方来源」——这正是米哈游诉
+// 「游创工坊」一案里被法院认定为侵权的理由之一（判决书：「必然导致《原神》用户流量
+// 有所减少」「针对《原神》游戏产生了一定的替代效果」，2024-04 一审，判赔 200 万）。
+//
+// 所以每个条目都要能一键回到观测枢原文。这不只是合规动作，也是产品该有的样子：
+// 用户核对原文的路径越短，越敢信你的检索结果。
+//
+// URL 规则：`/ys/obc/content/{entry_page_id}/detail`
+//   依据：tools/obc-refs.mjs 从观测枢真实 HTML 抽出的
+//   `data-entry-link="/ys/obc/content/54/detail"`。
+//
+// ⚠ 待人工验证一处：该注释里同时写着 `data-entry-name="迪卢克"`，而按观测枢 API 的
+//   entry_page_id，54 是「安柏」（obc_recommend 表里 src_id=54 的 src_name 即安柏）。
+//   两处对不上，说明注释里的名字可能是随手写的。**在浏览器打开一条链接确认一次即可**：
+//   若 54 显示的不是安柏，就把这里的路径规则换掉（只改这一个常量）。
+export const OBC_SOURCE_URL_BASE = 'https://baike.mihoyo.com/ys/obc/content/';
+
+/** 观测枢条目原文地址；id 非法时返回空串（宁可不给链接，也不给错链接）。 */
+export function obcSourceUrl(id) {
+  const n = Number(id);
+  if (!Number.isSafeInteger(n) || n <= 0) return '';
+  return `${OBC_SOURCE_URL_BASE}${n}/detail`;
+}
+
 
 export function openObc(dataDir, { readonly = true } = {}) {
   try {
@@ -115,6 +142,7 @@ export function obcList(db, { kind = '', q = '', page = 1, size = 40 } = {}) {
         menuLabel: r.menu_label, chars: r.text_len,
         score: r.score == null ? null : Number(r.score.toFixed(3)),
         snippet: obcSnippet(r.raw_json, query),
+        sourceUrl: obcSourceUrl(r.id),
       })),
     };
   }
@@ -131,6 +159,7 @@ export function obcList(db, { kind = '', q = '', page = 1, size = 40 } = {}) {
       id: r.id, name: r.name, kind: r.kind,
       label: obcLabel(r.kind),
       menuLabel: r.menu_label, chars: r.text_len, score: null, snippet: '',
+      sourceUrl: obcSourceUrl(r.id),
     })),
   };
 }

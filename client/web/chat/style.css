@@ -328,6 +328,24 @@ body {
 .src em { color: var(--accent); font-style: normal; font-weight: 600; }
 .src span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 「观测枢原文↗」—— 官方来源外链。
+   和引用 chip 分开画：chip 是不可点的标签（有意的，避免暴露本机知识库界面），
+   这个是官方外链，要一眼能认出可以点。 */
+.src-go {
+  display: inline-flex; align-items: center;
+  padding: 3px 9px;
+  border: 1px solid rgba(211, 188, 142, .38);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--gold, #d3bc8e);
+  font-size: 11.5px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background .15s var(--ease), border-color .15s var(--ease);
+}
+.src-go:hover { background: rgba(211, 188, 142, .12); border-color: var(--gold, #d3bc8e); }
+.src-go::after { content: ''; }
+
 /* 思考过程 */
 .think {
   margin-bottom: 9px;

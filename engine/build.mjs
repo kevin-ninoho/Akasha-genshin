@@ -74,7 +74,15 @@ function parseCharacter(file) {
     fields: {}, forms: [], bio: null, persona: null, note: null,
     stories: [], voices: [], relations: [], dialogueGroups: [], preferences: [],
     preamble: '',
+    // 文档头里的观测枢词条 id —— 用来给每条资料回链官方原文。
+    // 不解析它就只剩「来源：米游社观测枢」这行字，用户点不回去，
+    // 形态上就成了只吸收不送回（见 lib/obc.mjs 顶部关于回链的说明）。
+    obcId: null,
   };
+
+  // 观测枢词条 id：文档头写的是「> **数据来源**：米游社观测枢（…）。观测枢词条 id 1627。」
+  const obcMatch = /观测枢词条\s*id\s*(\d+)/.exec(md);
+  if (obcMatch) out.obcId = Number(obcMatch[1]);
 
   const firstH2 = nodes.findIndex((n) => n.level === 2);
   if (firstH2 > 0) out.preamble = inlineToPlain(lines.slice(1, nodes[firstH2].line).join('\n'));
@@ -270,6 +278,7 @@ CREATE TABLE IF NOT EXISTS characters (
   title TEXT, identity TEXT, faction TEXT, region TEXT, constellation TEXT,
   element TEXT, weapon TEXT, rarity INTEGER, birthday TEXT, cv_cn TEXT,
   release_date TEXT, note TEXT, persona TEXT, bio TEXT, preamble TEXT,
+  role TEXT, obc_id INTEGER,
   region_color TEXT, region_archon TEXT, art_backdrop TEXT,
   source_path TEXT, bytes INTEGER, mtime_ms REAL,
   has_full_art INTEGER DEFAULT 0, has_icon INTEGER DEFAULT 0,
@@ -371,7 +380,10 @@ function openDb() {
   db.exec('PRAGMA foreign_keys = OFF');
   db.exec(SCHEMA);
   // 迁移：老库补列（保留既有数据，避免 --incremental 时炸掉）
-  for (const [col, type] of [['en_name', 'TEXT'], ['pinyin', 'TEXT'], ['pinyin_spaced', 'TEXT']]) {
+  //   role   —— 观测枢角色页的「定位」，原先整列数据被丢弃
+  //   obc_id —— 观测枢词条 id，用于把每条资料回链官方原文
+  for (const [col, type] of [['en_name', 'TEXT'], ['pinyin', 'TEXT'], ['pinyin_spaced', 'TEXT'],
+                             ['role', 'TEXT'], ['obc_id', 'INTEGER']]) {
     try { db.exec(`ALTER TABLE characters ADD COLUMN ${col} ${type}`); } catch { /* 已存在 */ }
   }
   return db;
@@ -422,14 +434,15 @@ function writeCharacter(db, gid, rec, resolve, nameToId) {
   };
 
   db.prepare(`INSERT INTO characters(game_id,name,title,identity,faction,region,constellation,element,weapon,rarity,
-        birthday,cv_cn,release_date,note,persona,bio,preamble,region_color,region_archon,art_backdrop,
+        birthday,cv_cn,release_date,note,persona,bio,preamble,role,obc_id,region_color,region_archon,art_backdrop,
         source_path,bytes,mtime_ms,has_full_art,has_icon,thumb_url,display_url,icon_url,counts_json)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(game_id,name) DO UPDATE SET
         title=excluded.title, identity=excluded.identity, faction=excluded.faction, region=excluded.region,
         constellation=excluded.constellation, element=excluded.element, weapon=excluded.weapon, rarity=excluded.rarity,
         birthday=excluded.birthday, cv_cn=excluded.cv_cn, release_date=excluded.release_date, note=excluded.note,
-        persona=excluded.persona, bio=excluded.bio, preamble=excluded.preamble, region_color=excluded.region_color,
+        persona=excluded.persona, bio=excluded.bio, preamble=excluded.preamble,
+        role=excluded.role, obc_id=excluded.obc_id, region_color=excluded.region_color,
         region_archon=excluded.region_archon, art_backdrop=excluded.art_backdrop, source_path=excluded.source_path,
         bytes=excluded.bytes, mtime_ms=excluded.mtime_ms, has_full_art=excluded.has_full_art, has_icon=excluded.has_icon,
         thumb_url=excluded.thumb_url, display_url=excluded.display_url, icon_url=excluded.icon_url,
@@ -439,6 +452,7 @@ function writeCharacter(db, gid, rec, resolve, nameToId) {
       normDash(f['命之座']), normDash(f['元素']), normDash(f['武器']), rarity,
       normDash(f['生日']), normDash(f['CV（汉语）']), normDash(f['实装日期']), rec.note,
       rec.persona, rec.bio, rec.preamble,
+      normDash(f['定位']), rec.obcId ?? null,
       theme.color, theme.archon, theme.archon,
       rec.sourcePath, rec.bytes, rec.mtimeMs, hasFull, hasIcon,
       hasFull ? `/assets/thumbs/${slugName}.webp` : null,

@@ -14,7 +14,7 @@
 //      取最命中的那个（和 retrieve.mjs 的 ftsSources 同一套做法）。
 
 import { queryExpr, queryExprLoose, stripStopwords, snippet } from './tokenize.mjs';
-import { obcText } from './obc.mjs';
+import { obcText, obcSourceUrl } from './obc.mjs';
 // 分类白名单、中文标签与「按需放开」的触发词都来自 lib/obc-kinds.mjs（唯一事实来源）。
 // 这里只负责检索算法，不再自己维护一份 kind 清单 —— 原先这里和 blocks.mjs、
 // retrieve.mjs 各有一份，补采后 menu 涨到 53 个，漏同步就是整域搜不到。
@@ -199,5 +199,7 @@ export function obcSourceOf(hit) {
     url: `/obc.html#e${hit.id}`,
     obcId: hit.id,
     obcKind: hit.kind,
+    // 观测枢原文地址：让用户在答案旁就能核对官方出处，而不是只能看我们的转述。
+    sourceUrl: obcSourceUrl(hit.id),
   };
 }
