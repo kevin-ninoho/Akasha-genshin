@@ -516,16 +516,18 @@
     return '<div class="hero">' +
       '<div class="big">💬</div>' +
       '<h2>Akasha</h2>' +
-      '<p>提瓦特知识助手 · 检索知识库作答，结论带 [n] 引用，可点回原文。</p>' +
+      // 首屏这句话是定位，不是功能列表。
+      // 早先写「检索知识库作答」—— 那是把它当搜索框。它的价值在
+      // 「把散落在官方原典里的东西变成能直接用的结论」，且**每条可回溯**。
+      '<p>二游垂直 AI 工作台 · 事实取自官方原典，结论逐条可回溯</p>' +
       '<div class="archon-row" id="archon-row"></div>' +
       '<div class="starters">' + STARTERS.map(function (s) {
         return '<button class="starter" data-say="' + esc(s) + '">' + esc(s) + '</button>';
-      }).join('') + '</div>' +
-      // 技能条：空白页最该回答的是「这东西能干嘛」。
-      // 用户反馈「界面太干净，不知道能做什么」—— 只加顶栏按钮不够，
-      // 得让第一屏自己说话。内容由 skills.js 异步填。
-      (window.AkashaSkills ? window.AkashaSkills.renderStrip() : '') +
-      '</div>';
+      }).join('') + '</div></div>' +
+      // 这里曾经有一片「能做这些」技能条。去掉了 ——
+      // 左侧「技能」已经是一级导航，再在首屏铺十几个 chip 是重复且拥挤的，
+      // 用户会自己点。首屏只留最能让人开口的那几个例子。
+      '';
   }
 
   /**
@@ -592,7 +594,7 @@
 
   // ---------------------------------------------------------------- 已选技能
 
-  var HINT_DEFAULT = '回答基于知识库检索，带 [n] 引用 · 试试「胡桃80级练到90要什么」';
+  var HINT_DEFAULT = '结论逐条可回溯官方原文 · 试试「胡桃80级练到90要什么」';
 
   /**
    * 挂上一个技能（点技能卡来的）。**不发消息** —— 用户接下来自己说要问什么。
@@ -635,7 +637,6 @@
     if (!c || !c.messages.length) {
       els.log.innerHTML = emptyHtml();
       loadArchonRow();
-      if (window.AkashaSkills) window.AkashaSkills.paintStrip();
       state.botEl = null;
       return;
     }

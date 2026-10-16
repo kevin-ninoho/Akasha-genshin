@@ -1,16 +1,17 @@
-/* Akasha · 技能目录
+/* Akasha · 技能
  *
  * 解决的是「界面太干净，用户不知道这东西能干嘛」。
  *
  * **技能是侧栏的一级导航**（与「对话」并列），点开在主区占一整屏 —— 照豆包的排版：
- * 左边分类、右边卡片、点卡片就跑。不是浮层，也不是藏在图标后面的按钮。
+ * 左边分类、右边卡片、点卡片就选中它。不是浮层，也不是藏在图标后面的按钮。
  *
- * 两处展示，同一份数据（GET /v1/skills）：
- *   1. renderStrip()  对话空白页嵌的一片 —— 用户不点技能时也能看见能做什么。
- *   2. paintView()    技能视图整屏（主区 #view-skills）。
+ * 数据来自 GET /v1/skills。
  *
  * 状态三档必须区分清楚：可用 / 测试中 / 计划中。
  * 把没做的技能画成能点的，是骗人；但完全不画，用户就不知道这东西要往哪长。
+ *
+ * ⚠ 这里曾经还有一片「空白页技能条」（renderStrip/paintStrip），已删除：
+ *   左侧已经是一级导航，再在首屏铺十几个 chip 是重复且拥挤的。
  */
 (function () {
   'use strict';
@@ -96,42 +97,6 @@
     }
   }
 
-  // ---------------------------------------------------------------- 对话空白页那片
-
-  /** 只显示「可用」和「测试中」的，计划中的不占地方。 */
-  function renderStrip() {
-    return '<div class="sk-strip" id="sk-strip">' +
-      '<div class="sk-strip-head">能做这些<span class="sk-hint">点一下就问 · 或看左边「技能」</span></div>' +
-      '<div class="sk-strip-body" id="sk-strip-body"><div class="sk-loading">读取能力清单…</div></div>' +
-      '</div>';
-  }
-
-  function paintStrip() {
-    var box = document.getElementById('sk-strip-body');
-    if (!box) return;
-    load().then(function (cat) {
-      // fetch 回来要重新取元素：这期间用户可能已经开了新对话重渲染过
-      box = document.getElementById('sk-strip-body');
-      if (!box) return;
-      if (!cat) { box.innerHTML = ''; return; }
-      var all = flat(cat).filter(function (s) { return s.status !== 'planned'; });
-      if (!all.length) { box.innerHTML = ''; return; }
-      box.innerHTML = all.map(function (s) {
-        var st = STATUS[s.status] || STATUS.ready;
-        return '<button class="sk-chip ' + st.cls + '" data-skill="' + esc(s.id) + '" title="' + esc(s.description) + '">' +
-          '<span class="sk-ico">' + esc(s.icon) + '</span>' +
-          '<span class="sk-name">' + esc(s.label) + '</span>' +
-          '<span class="sk-dot" title="' + st.label + '">' + st.mark + '</span>' +
-          '</button>';
-      }).join('');
-      var planned = flat(cat).filter(function (s) { return s.status === 'planned'; }).length;
-      if (planned) {
-        box.insertAdjacentHTML('beforeend',
-          '<button class="sk-chip sk-more" data-nav-to="skills">还有 ' + planned + ' 个在路上 ›</button>');
-      }
-    });
-  }
-
   // ---------------------------------------------------------------- 技能视图（主区整屏）
 
   /** 左边分类锚点 + 右边卡片。窄屏时分类横排。 */
@@ -212,8 +177,6 @@
   // ---------------------------------------------------------------- 入口
 
   window.AkashaSkills = {
-    renderStrip: renderStrip,
-    paintStrip: paintStrip,
     paintView: paintView,
     pick: pick,
     run: run,
@@ -224,13 +187,11 @@
     },
   };
 
-  // 点技能（技能视图的卡 或 空白页那片的 chip）→ **只挂模式，不发消息**。
+  // 点技能（技能视图的卡）→ **只挂模式，不发消息**。
   // 之所以不交给 app.js 的全局 [data-say] 处理器：那个是直接 ask()，
   // 会把写死的例子发出去（于是永远只能看到胡桃）。技能不是快捷问题。
   document.addEventListener('click', function (ev) {
     var s = ev.target.closest('[data-skill]');
-    if (s) { pick(s.getAttribute('data-skill')); return; }
-    var nav = ev.target.closest('#sk-strip [data-nav-to]');
-    if (nav && window.AkashaChat && window.AkashaChat.showSkills) window.AkashaChat.showSkills();
+    if (s) { pick(s.getAttribute('data-skill')); }
   });
 })();
