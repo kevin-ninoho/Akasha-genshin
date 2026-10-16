@@ -28,13 +28,18 @@ export { OBC_KIND_LABEL, obcLabel };
 // 用户核对原文的路径越短，越敢信你的检索结果。
 //
 // URL 规则：`/ys/obc/content/{entry_page_id}/detail`
-//   依据：tools/obc-refs.mjs 从观测枢真实 HTML 抽出的
-//   `data-entry-link="/ys/obc/content/54/detail"`。
 //
-// ⚠ 待人工验证一处：该注释里同时写着 `data-entry-name="迪卢克"`，而按观测枢 API 的
-//   entry_page_id，54 是「安柏」（obc_recommend 表里 src_id=54 的 src_name 即安柏）。
-//   两处对不上，说明注释里的名字可能是随手写的。**在浏览器打开一条链接确认一次即可**：
-//   若 54 显示的不是安柏，就把这里的路径规则换掉（只改这一个常量）。
+// ✅ 2026-10-16 已验证，这条规则是对的，之前的疑虑可以放下。
+//   验证方式：观测枢词条正文的 HTML 里成对出现 id / 名称 / 链接三者，例如
+//     data-entry-id="837"  data-entry-name="「黄金」的指引×2"
+//     data-entry-link="/ys/obc/content/837/detail?bbs_presentation_style=no_header"
+//   拿这些 id 回本地库核对，同名同物（837「黄金」的指引、826「诗文」的指引、
+//   823「抗争」的指引、1025 大英雄的经验、1030 精锻用魔矿 全部一致）。
+//   所以**本地 obc_entries.id 与 URL 里的 id 是同一个 id 空间**。
+//
+//   原先那句注释写着 `data-entry-name="迪卢克" data-entry-link="/ys/obc/content/54/detail"`，
+//   与「54 是安柏」对不上 —— 现在确认是那句**旧笔记写串了**，不是 URL 规则错。
+//   （id=54 在本库是安柏，与 obc_recommend 表一致。）
 export const OBC_SOURCE_URL_BASE = 'https://baike.mihoyo.com/ys/obc/content/';
 
 /** 观测枢条目原文地址；id 非法时返回空串（宁可不给链接，也不给错链接）。 */

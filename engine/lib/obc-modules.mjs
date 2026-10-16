@@ -118,6 +118,9 @@ function parseAscensions(raw) {
       name: String(m.nickname || '').trim(),
       amount: Number(m.amount) || 0,
       icon: m.img || '',
+      // 材料自己的词条 id。练度规划要用它生成「这个材料在哪」的官方回链 ——
+      // 以前这里只留了名字和图标，回链就断了。
+      obcId: Number(m.ep_id) || null,
     })).filter((m) => m.name),
     attrs: (it.attr && it.attr.row)
       ? (it.attr.row || []).map((r) => (Array.isArray(r) ? r : [r]).map((c) => stripHtml(c)))

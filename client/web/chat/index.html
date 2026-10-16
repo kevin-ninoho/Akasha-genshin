@@ -16,6 +16,12 @@
           <span class="ico">＋</span> 新对话
         </button>
       </div>
+      <!-- 一级导航。技能与对话平级，不是藏在浮层里的按钮 ——
+           用户第一次打开就该看见「这东西能干什么」，而不是一个光秃秃的输入框。 -->
+      <nav class="side-nav" id="side-nav" aria-label="主导航">
+        <button class="nav-i on" data-nav="chat"><span class="ni">💬</span>对话</button>
+        <button class="nav-i" data-nav="skills"><span class="ni">✦</span>技能<span class="nc" id="nav-skill-count"></span></button>
+      </nav>
       <nav class="convos" id="convos" aria-label="会话列表"></nav>
       <div class="side-foot">
         <span class="dot" id="dot"></span>
@@ -23,7 +29,7 @@
       </div>
     </aside>
 
-    <main class="main">
+    <main class="main" id="main" data-view="chat">
       <header class="top">
         <button class="icon only-narrow" id="menu" title="会话列表" aria-label="会话列表">☰</button>
         <h1 id="title">新对话</h1>
@@ -38,7 +44,19 @@
 
       <div class="log" id="log" role="log" aria-live="polite"></div>
 
+      <!-- 技能视图：与对话并列的一屏，不是浮层。
+           点某个技能就跑它（切回对话并发出去）。 -->
+      <div class="view" id="view-skills" hidden></div>
+
       <footer class="composer">
+        <!-- 已选技能。点技能卡 → 技能出现在这里 → 用户再打字说要件。
+             技能是**模式**不是快捷问题：选了「角色档案」是要问「钟离是谁」，
+             不该替用户发一条写死的「胡桃是谁」。 -->
+        <div class="picked" id="picked" hidden>
+          <span class="picked-ico" id="picked-ico"></span>
+          <span class="picked-name" id="picked-name"></span>
+          <button class="picked-x" id="picked-x" title="取消这个技能">✕</button>
+        </div>
         <div class="box">
           <textarea id="input" rows="1" placeholder="问点什么…（Enter 发送，Shift + Enter 换行）"
                     autocomplete="off" spellcheck="false"></textarea>
@@ -50,13 +68,21 @@
         </div>
         <div class="composer-foot">
           <button class="chip" id="think" aria-pressed="false" title="深度思考：关（快速作答）">💡 深度思考 · 关</button>
-          <span class="muted" id="hint">回答基于知识库检索，带 [n] 引用</span>
+          <!-- 练度规划是**说话触发**的技能，不是藏在图标后面的开关。
+               这里把它讲出来，否则用户不会知道能这么问。 -->
+          <span class="muted" id="hint">回答基于知识库检索，带 [n] 引用 · 试试「胡桃80级练到90要什么」</span>
         </div>
       </footer>
     </main>
   </div>
   <link rel="stylesheet" href="/media.css">
+  <link rel="stylesheet" href="/planner.css">
+  <link rel="stylesheet" href="/skills.css">
   <script src="/media.js"></script>
+  <!-- 都要在 app.js 之前：app.js 的空状态会在渲染时读
+       window.AkashaSkills / window.AkashaPlanner（与 AkashaMedia 同一个挂法）。 -->
+  <script src="/skills.js"></script>
+  <script src="/planner.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

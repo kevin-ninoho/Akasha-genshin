@@ -62,6 +62,37 @@ export function openV1(dataDir, { writable = true } = {}) {
   const q = (sql, ...p) => db.prepare(sql).all(...p);
   const one = (sql, ...p) => db.prepare(sql).get(...p);
 
+  // ---------------------------------------------------------------- 回官方原文
+
+  // 每个域都尽量给出「观测枢原文」链接，让用户能回官方核对，而不是只看我们的转述。
+  //
+  // 为什么值得为四个域各写一条映射：客户端里那枚「原文↗」是按 sourceUrl 渲染的，
+  // 缺了它，用户看到的就是一个点不动的来源标签（此前 book / voice / dialogue /
+  // relation 四个域都是这样，只有 character 和 obc 能跳）。
+  //
+  // 各域的锚定依据（都实测过覆盖率，见下方注释）：
+  //   character → characters.obc_id
+  //   obc       → obc_entries.id 本身
+  //   voice     → 语音挂在角色页的「配音展示」模块下，锚到该角色的词条
+  //   relation  → 关系同样来自角色页，锚到**来源角色**的词条
+  //   dialogue  → dialogue_groups.quest_id 就是观测枢词条 id（3863/3863 有值，
+  //               932/932 在观测枢真实存在，128828 行台词 100% 可挂）
+  //   book      → books.title 精确等于观测枢 kind='book' 词条名（93/93 全中）
+  //
+  // 拿不到就返回空串（obcSourceUrl 对非法 id 返回 ''），客户端会自然不渲染链接 ——
+  // 宁可不给，也不给一个错的官方地址。
+  const obcIdByBookTitle = (() => {
+    let stmt = null;
+    return (title) => {
+      if (!obc) return null;
+      try {
+        if (!stmt) stmt = obc.prepare("SELECT id FROM obc_entries WHERE kind = 'book' AND name = ? LIMIT 1");
+        const r = stmt.get(String(title || ''));
+        return r ? r.id : null;
+      } catch { return null; }
+    };
+  })();
+
   // ---------------------------------------------------------------- 覆盖清单
 
   function coverage() {
@@ -185,7 +216,12 @@ export function openV1(dataDir, { writable = true } = {}) {
 
     let items;
     if (domain === 'character') items = rows.map(characterCard);
-    else if (domain === 'book') items = rows.map((r) => ({ id: r.id, title: r.title, volumes: r.volume_count, chars: r.char_count, url: `/#/book/${r.id}` }));
+    else if (domain === 'book') items = rows.map((r) => ({
+      id: r.id, title: r.title, volumes: r.volume_count, chars: r.char_count,
+      url: `/#/book/${r.id}`,
+      // 书籍靠**书名**对齐观测枢的 kind='book' 词条（本地 93 本 ↔ 观测枢 93 条，全中）。
+      sourceUrl: obcSourceUrl(obcIdByBookTitle(r.title)),
+    }));
     else if (domain === 'voice') items = rows.map((r) => voiceItem(r));
     else if (domain === 'dialogue') items = rows.map((r) => dialogueItem(r));
     else items = rows.map((r) => relationItem(r));
@@ -233,11 +269,14 @@ export function openV1(dataDir, { writable = true } = {}) {
     };
   }
   function voiceItem(r) {
-    const c = one('SELECT name FROM characters WHERE id = ?', r.character_id);
+    const c = one('SELECT name, obc_id FROM characters WHERE id = ?', r.character_id);
     return {
       id: r.id, characterId: r.character_id, character: c ? c.name : '',
       group: r.grp || '', name: r.name, text: r.text,
       url: `/#/character/${r.character_id}`,
+      // 语音在观测枢是角色页的「配音展示」模块，所以回链指向该角色的词条。
+      // 6951/6951 条语音的角色都有 obc_id，无一遗漏。
+      sourceUrl: obcSourceUrl(c && c.obc_id),
     };
   }
   function dialogueItem(r) {
@@ -246,13 +285,21 @@ export function openV1(dataDir, { writable = true } = {}) {
       id: r.id, characterId: r.character_id, character: c ? c.name : '',
       questType: r.quest_type || '', chapter: r.chapter || '', questTitle: r.quest_title || '',
       lines: r.line_count, url: `/#/character/${r.character_id}`,
+      // dialogue_groups.quest_id 本身就是观测枢的词条 id（不是名字）。
+      // 这一点很关键：按名字匹配只有 636/1149，因为观测枢的名字带章节前缀
+      // （「春曦画桃符 第三回「…」」），而本地 quest_title 只有内层那段；
+      // 按 id 则是精确的 —— 932/932 个去重 quest_id 都在观测枢真实存在。
+      sourceUrl: obcSourceUrl(r.quest_id),
     };
   }
   function relationItem(r) {
-    const s = one('SELECT name FROM characters WHERE id = ?', r.src_id);
+    const s = one('SELECT name, obc_id FROM characters WHERE id = ?', r.src_id);
     return {
       id: r.id, from: s ? s.name : String(r.src_id), fromId: r.src_id,
       to: r.target_name || '', toId: r.target_id, quote: r.quote || '',
+      // 关系条目是角色页里「角色关联语音」的引文，锚到**来源角色**的词条。
+      // 1234/1234 全部可挂。
+      sourceUrl: obcSourceUrl(s && s.obc_id),
     };
   }
 
@@ -295,6 +342,8 @@ export function openV1(dataDir, { writable = true } = {}) {
         sections: q('SELECT ord, title, body FROM book_sections WHERE book_id = ? ORDER BY ord', n)
           .map((s) => ({ title: s.title, body: s.body })),
         url: `/#/book/${r.id}`,
+        // 和列表同样按书名对齐观测枢的 kind='book' 词条
+        sourceUrl: obcSourceUrl(obcIdByBookTitle(r.title)),
       };
     }
     if (kind === 'obc') {

@@ -12,6 +12,8 @@ import { MediaJobs } from './lib/media-jobs.mjs';
 import { loadVideoIndex } from './lib/video-index.mjs';
 import { corpusRevision } from './lib/corpus-revision.mjs';
 import { loadConfig, resolveProvider, resolveThinking } from './chat/llm.mjs';
+import { buildPlan } from './lib/plan.mjs';
+import { skillCatalog } from './lib/skills/index.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.KB_DATA_DIR || path.join(HERE, 'data');
@@ -183,7 +185,7 @@ const media = new MediaJobs({root:process.env.KB_MEDIA_CACHE || path.join(DATA,'
   return videoIndex.entries.get(`${id}:${index}`) || null;
 }});
 let statusCache = null;
-const HANDLED = new Set(['meta', 'query', 'record', 'asset', 'retrieve', 'chat', 'health', 'usage', 'domains', 'demo', 'videos', 'media', 'status']);
+const HANDLED = new Set(['meta', 'query', 'record', 'asset', 'retrieve', 'chat', 'health', 'usage', 'domains', 'demo', 'videos', 'media', 'status', 'plan', 'skills']);
 
 async function routeV1(req, res, url, seg) {
   const head = seg[1] || '';
@@ -192,8 +194,8 @@ async function routeV1(req, res, url, seg) {
   }
   // 方法校验：GET 类接口不接受 POST，POST 类接口不接受 GET。
   // 不加这一层的话 POST /v1/query 会被当成普通查询静默放行。
-  const GET_ONLY = new Set(['meta', 'domains', 'query', 'record', 'asset', 'demo', 'status']);
-  const POST_ONLY = new Set(['retrieve', 'chat', 'usage']);
+  const GET_ONLY = new Set(['meta', 'domains', 'query', 'record', 'asset', 'demo', 'status', 'skills']);
+  const POST_ONLY = new Set(['retrieve', 'chat', 'usage', 'plan']);
   if (GET_ONLY.has(head) && req.method !== 'GET' && req.method !== 'HEAD') {
     throw new ApiError(405, 'method_not_allowed', `/v1/${head} 只接受 GET`);
   }
@@ -277,7 +279,8 @@ async function routeV1(req, res, url, seg) {
       },
       endpoints: [
         'GET  /v1/meta', 'GET  /v1/domains', 'GET  /v1/query', 'GET  /v1/record/:kind/:id',
-        'GET  /v1/asset/:kind/:id', 'POST /v1/retrieve', 'POST /v1/chat', 'GET  /v1/demo',
+        'GET  /v1/asset/:kind/:id', 'POST /v1/retrieve', 'POST /v1/chat', 'POST /v1/plan',
+        'GET  /v1/demo',
       ],
       // 结构化答案块：客户端据此决定要不要注册对应渲染器。
       // 不在这里声明的话，旧客户端收到 block 事件也不会画，只能看到文字回答。
@@ -312,6 +315,36 @@ async function routeV1(req, res, url, seg) {
     const rec = v1.getRecord(kind, id);
     if (!rec) throw new ApiError(404, 'record_not_found', `没有 ${kind} #${id}`);
     return sendJson(res, rec);
+  }
+
+  if (head === 'skills') {
+    // 技能目录。客户端拿它画技能面板 —— 「这客户端能干什么」不该靠用户自己猜。
+    // 纯静态元数据（lib/skills/index.mjs 的 SKILLS），不含任何用户数据。
+    return sendJson(res, skillCatalog());
+  }
+
+  if (head === 'plan') {
+    // 练度规划。**纯计算**：不调模型、不写库，同样输入永远同样输出。
+    //
+    // 玩家的角色清单存在客户端（localStorage）后随请求发来 —— 不是不想存服务端，
+    // 是**所有客户端共用同一个 token**，服务端拿不到用户身份。要存服务端得先建
+    // 用户体系，那是另一期的事。
+    if (req.method !== 'POST') throw new ApiError(405, 'method_not_allowed', '用法：POST /v1/plan');
+    const body = await readBody(req);
+    const out = buildPlan(v1, {
+      roster: body && body.roster,
+      target: body && body.target,
+      resin: body && body.resin,
+      prefer: body && body.prefer,
+      optimize: body && body.optimize,
+    });
+    if (!out.ok) {
+      const code = out.error || 'bad_request';
+      // 名单过大是请求体的问题，用 413；其余是参数问题，用 400
+      const status = code === 'roster_too_large' ? 413 : 400;
+      throw new ApiError(status, code, out.message || '规划参数有误');
+    }
+    return sendJson(res, out);
   }
 
   if (head === 'asset') {
@@ -361,6 +394,20 @@ async function routeV1(req, res, url, seg) {
     if (!message) throw new ApiError(400, 'empty_message', 'message 不能为空');
     const sessionId = String(body.sessionId || auth.hash).slice(0, 64);
     const think = typeof body.think === 'boolean' ? body.think : undefined;
+    // 玩家自己的角色清单（存在客户端 localStorage，随请求带来）。
+    // 规划要「按这个号算」，但服务端拿不到用户身份（所有客户端共用一个 token），
+    // 所以清单只能由客户端带。形状与 /v1/plan 的 roster 一致。
+    // 只做最外层校验：非数组就当没带，剩下的交给 buildPlan 逐条判断。
+    const roster = Array.isArray(body.roster)
+      ? body.roster.slice(0, 20).map((r) => ({
+        charId: Number(r && r.charId),
+        level: Number(r && r.level),
+        name: String((r && r.name) || ''),
+      })).filter((r) => Number.isFinite(r.charId))
+      : [];
+    // 用户在输入框上方**明确选的技能**（点技能卡来的）。
+    // 有它就不再靠正则猜他要什么 —— 他已经说了。空串表示没选。
+    const skill = String(body.skill || '').slice(0, 40);
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -418,7 +465,7 @@ async function routeV1(req, res, url, seg) {
           // 块挂在 chatInput 上，agent.mjs 会在 buildMessages 时读到，
           // 从而告诉模型「这些内容界面已经展示了，别复述」。
           try {
-            blocks = buildBlocks({ v1, question: message, anchors, entities, videoIndex });
+            blocks = buildBlocks({ v1, question: message, anchors, entities, videoIndex, roster, skill });
           } catch { blocks = []; }
           if (blocks.length) {
             chatInput.blockHint = blockHintForPrompt(blocks, message);

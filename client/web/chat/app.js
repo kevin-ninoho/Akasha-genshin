@@ -25,6 +25,8 @@
     model: $('model'), dot: $('dot'),
     title: $('title'), provider: $('provider'), reset: $('reset'),
     log: $('log'), input: $('input'), send: $('send'), think: $('think'), hint: $('hint'),
+    main: $('main'), nav: $('side-nav'), viewSkills: $('view-skills'),
+    picked: $('picked'), pickedIco: $('picked-ico'), pickedName: $('picked-name'), pickedX: $('picked-x'),
   };
 
   // ⚠ 这里**曾经**有一个 cfg = { kbLink: ... }，以及基于它拼地址的 kbUrl()。
@@ -43,6 +45,10 @@
     think: false,
     botEl: null,
     botMsg: null,
+    // 已选技能（点技能卡来的）。只作用于**下一次**提问，发完就清 ——
+    // 否则用户会以为它一直生效，问别的也被这个技能接管。
+    skill: '',
+    skillLabel: '',
     paintQueued: false,
   };
 
@@ -234,6 +240,9 @@
       case 'constellation': return blockConstellation(b);
       case 'ascension': return blockAscension(b);
       case 'video-scenes': return window.AkashaMedia ? window.AkashaMedia.render(b) : '';
+      // 练度规划：渲染器与「我的角色」抽屉放在 planner.js 里（照 AkashaMedia 的挂法），
+      // 这样抽屉和聊天两处**共用同一份渲染代码**，样式不会走偏。
+      case 'plan': return window.AkashaPlanner ? window.AkashaPlanner.render(b) : '';
       default: return '<div class="blk-none">（未支持的结果类型：' + esc(b.kind) + '）</div>';
     }
   }
@@ -511,7 +520,12 @@
       '<div class="archon-row" id="archon-row"></div>' +
       '<div class="starters">' + STARTERS.map(function (s) {
         return '<button class="starter" data-say="' + esc(s) + '">' + esc(s) + '</button>';
-      }).join('') + '</div></div>';
+      }).join('') + '</div>' +
+      // 技能条：空白页最该回答的是「这东西能干嘛」。
+      // 用户反馈「界面太干净，不知道能做什么」—— 只加顶栏按钮不够，
+      // 得让第一屏自己说话。内容由 skills.js 异步填。
+      (window.AkashaSkills ? window.AkashaSkills.renderStrip() : '') +
+      '</div>';
   }
 
   /**
@@ -549,12 +563,79 @@
   var modelCache = '';
   function modelName() { return modelCache; }
 
+  /**
+   * 切主区视图：'chat' | 'skills'。
+   *
+   * 技能是**一级导航**（侧栏与「对话」并列），不是浮层 ——
+   * 用户第一次打开就该看见「这东西能干什么」。
+   * 切换靠 data-view 属性 + CSS 控制显隐，不重排 DOM（重排会丢滚动位置和焦点）。
+   */
+  function setView(view) {
+    var v = view === 'skills' ? 'skills' : 'chat';
+    if (els.main) els.main.dataset.view = v;
+    if (els.nav) {
+      Array.prototype.forEach.call(els.nav.querySelectorAll('[data-nav]'), function (b) {
+        b.classList.toggle('on', b.getAttribute('data-nav') === v);
+      });
+    }
+    // 技能视图下会话列表没意义，收掉它，把侧栏的空间让给导航
+    if (els.side) els.side.classList.toggle('hide-convos', v === 'skills');
+    if (els.viewSkills) els.viewSkills.hidden = v !== 'skills';
+    if (v === 'skills' && window.AkashaSkills) window.AkashaSkills.paintView();
+    if (v === 'chat' && els.input) els.input.focus();
+  }
+
+  /** 会话列表只在对话视图里出现（技能视图下点会话没意义）。 */
+  function activeView() {
+    return els.main && els.main.dataset.view === 'skills' ? 'skills' : 'chat';
+  }
+
+  // ---------------------------------------------------------------- 已选技能
+
+  var HINT_DEFAULT = '回答基于知识库检索，带 [n] 引用 · 试试「胡桃80级练到90要什么」';
+
+  /**
+   * 挂上一个技能（点技能卡来的）。**不发消息** —— 用户接下来自己说要问什么。
+   *
+   * 技能是「用什么工具」不是「问什么问题」。早先点卡片直接发一条写死的例子，
+   * 于是永远只能看到胡桃 —— 那是把工具当成了快捷回复。
+   *
+   * @param {{id:string,label:string,icon:string,example:string}} s
+   */
+  function setSkill(s) {
+    if (!s || !s.id) return clearSkill();
+    state.skill = s.id;
+    state.skillLabel = s.label || s.id;
+    if (els.picked) {
+      if (els.pickedIco) els.pickedIco.textContent = s.icon || '✦';
+      if (els.pickedName) els.pickedName.textContent = s.label || s.id;
+      els.picked.hidden = false;
+    }
+    // placeholder 直接把「你可以这么问」摆出来 —— 比只说「已选某技能」有用
+    if (els.input) {
+      els.input.placeholder = s.example
+        ? '用「' + (s.label || s.id) + '」问点什么…比如「' + s.example + '」'
+        : '用「' + (s.label || s.id) + '」问点什么…';
+      els.input.focus();
+    }
+    if (els.hint) els.hint.textContent = '已选技能：' + (s.label || s.id) + ' · 它只管这一次提问';
+  }
+
+  function clearSkill() {
+    state.skill = '';
+    state.skillLabel = '';
+    if (els.picked) els.picked.hidden = true;
+    if (els.input) els.input.placeholder = '问点什么…（Enter 发送，Shift + Enter 换行）';
+    if (els.hint) els.hint.textContent = HINT_DEFAULT;
+  }
+
   function renderLog() {
     var c = cur();
     els.title.textContent = c ? c.title : '新对话';
     if (!c || !c.messages.length) {
       els.log.innerHTML = emptyHtml();
       loadArchonRow();
+      if (window.AkashaSkills) window.AkashaSkills.paintStrip();
       state.botEl = null;
       return;
     }
@@ -631,10 +712,19 @@
     var t0 = Date.now();
 
     try {
+      // 带上「我的角色」清单：规划那类问题要按这个号算，而清单只存在本地
+      // （服务端拿不到用户身份 —— 所有客户端共用同一个 token）。
+      // 没有清单时传空数组，服务端会退回「只按问题里点名的角色」算。
+      var roster = (window.AkashaPlanner && window.AkashaPlanner.rosterFor)
+        ? window.AkashaPlanner.rosterFor() : [];
+      // skill：用户在界面上明确选的技能。服务端会把它排在路由结果之前 ——
+      // 他点了「角色档案」才来问「钟离是谁」，不该再靠正则猜。
+      var skillId = state.skill || '';
+      clearSkill();   // 只作用于这一次
       var res = await fetch('/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify({ message: text, sessionId: 'web-' + c.id, think: state.think }),
+        body: JSON.stringify({ message: text, sessionId: 'web-' + c.id, think: state.think, roster: roster, skill: skillId }),
         signal: state.abort.signal,
       });
       if (!res.ok) {
@@ -823,9 +913,18 @@
 
   els.new.addEventListener('click', function () {
     newConvo();
+    setView('chat');          // 从技能视图点「新对话」要回到对话
     els.input.focus();
     if (window.innerWidth <= 720) els.side.classList.remove('open');
   });
+
+  // 一级导航：对话 / 技能
+  if (els.nav) {
+    els.nav.addEventListener('click', function (ev) {
+      var b = ev.target.closest('[data-nav]');
+      if (b) { setView(b.getAttribute('data-nav')); if (window.innerWidth <= 720) els.side.classList.remove('open'); }
+    });
+  }
 
   els.convos.addEventListener('click', function (ev) {
     var del = ev.target.closest('[data-del]');
@@ -841,11 +940,15 @@
     if (row) {
       state.curId = row.getAttribute('data-id');
       renderSidebar(); renderLog();
+      setView('chat');        // 点会话 = 要看那条对话
       if (window.innerWidth <= 720) els.side.classList.remove('open');
     }
   });
 
   els.menu.addEventListener('click', function () { els.side.classList.toggle('open'); });
+
+  // 取消已选技能
+  if (els.pickedX) els.pickedX.addEventListener('click', clearSkill);
 
   // ⚠ 这里原本绑了一个「打开知识库」按钮的点击（window.open(kbUrl('#/'))）。
   //   按钮和事件都已删除：客户端不该有任何通往知识库本体的入口。
@@ -987,6 +1090,23 @@
     autoGrow();
     els.input.focus();
   }
+
+  // 对外暴露的最小接口。
+  //
+  // 为什么需要：技能面板在侧栏是**一级导航**，点一个技能要能真的跑起来 ——
+  // 而 ask() 在 app.js 的闭包里（它管会话状态、流式渲染、引用）。让 skills.js
+  // 自己再造一套发送逻辑，就是两份实现、两处 bug。
+  // 只暴露 ask 一个函数，不给别的 —— 暴露面越小越不容易被绕过。
+  window.AkashaChat = {
+    ask: ask,
+    /** 切到对话视图（技能卡点完要回到对话看结果）。 */
+    showChat: function () { setView('chat'); },
+    /** 切到技能视图（空白页的「还有 N 个在路上」要能跳过来）。 */
+    showSkills: function () { setView('skills'); },
+    /** 挂上一个技能（点技能卡来的）。只作用于下一次提问。 */
+    setSkill: setSkill,
+    clearSkill: clearSkill,
+  };
 
   boot();
 })();

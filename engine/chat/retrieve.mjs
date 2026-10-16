@@ -14,6 +14,7 @@ import { ENTITY_ALIASES as ALIASES } from '../lib/nicknames.mjs';
 import { shortNameAtOk } from '../lib/names.mjs';
 import { queryExpr, queryExprLoose, stripStopwords } from '../lib/tokenize.mjs';
 import { searchObc, obcSourceOf, searchObcByName } from '../lib/obc-search.mjs';
+import { obcSourceUrl } from '../lib/obc.mjs';
 // 观测枢分类知识（哪些域主库没有、什么问法放开哪个域）只此一处，见 lib/obc-kinds.mjs。
 import { OBC_ONLY_KINDS, OBC_GEAR_ASK_RE, pickObcKinds } from '../lib/obc-kinds.mjs';
 
@@ -112,6 +113,93 @@ function pickByKeyword(rows, keywords, limit, titleOf, bodyOf) {
 export function createRetriever(db, obcDb = null) {
   const all = (sql, ...p) => db.prepare(sql).all(...p);
   const one = (sql, ...p) => db.prepare(sql).get(...p);
+
+  // ---------------------------------------------------------- 回官方原文
+  //
+  // 客户端下方「引用」列表里那枚「原文↗」是按 sourceUrl 渲染的；缺了它，用户
+  // 看到的就是一个点不动的标签（引用 chip 本身恒为标签，那是既定的合规约束 ——
+  // 但**官方外链**是另一回事：只吸收不送回，形态上等于替代官方来源）。
+  //
+  // 在**汇总之后统一补**，而不是让每个取数函数各自去设：造 source 的地方有十来处
+  // （profile / story / voice / dialogue / preference / relation / fts / book /
+  // 观测枢…），漏一处就有一个域点不动。集中补只写一次。
+  //
+  // 锚定规则：
+  //   characterId → 该角色的观测枢词条（角色档案 / 故事 / 语音 / 台词 / 关系 /
+  //                 相关提及，在观测枢都属于这个角色的页面）
+  //   bookId      → 同名观测枢 kind='book' 词条
+  //   其它        → 空串，客户端自然不渲染链接（宁可不给，也不给错地址）
+  const obcIdOfCharacter = (() => {
+    const cache = new Map();
+    return (id) => {
+      if (id == null) return null;
+      if (cache.has(id)) return cache.get(id);
+      let v = null;
+      try { const r = one('SELECT obc_id FROM characters WHERE id = ?', id); v = r ? r.obc_id : null; } catch { /* 忽略 */ }
+      cache.set(id, v);
+      return v;
+    };
+  })();
+  const obcIdOfBook = (() => {
+    const cache = new Map();
+    return (id) => {
+      if (id == null || !obcDb) return null;
+      if (cache.has(id)) return cache.get(id);
+      let v = null;
+      try {
+        const r = one('SELECT title FROM books WHERE id = ?', id);
+        if (r && r.title) {
+          const hit = obcDb.prepare("SELECT id FROM obc_entries WHERE kind = 'book' AND name = ? LIMIT 1").get(r.title);
+          v = hit ? hit.id : null;
+        }
+      } catch { /* 忽略 */ }
+      cache.set(id, v);
+      return v;
+    };
+  })();
+  // FTS 兜底路径（search_docs）的对话行没有 quest_id，但 heading 的第一段就是
+  // quest_title —— 格式固定为 `任务名 · 任务类型 · 章节`。按它反查即可。
+  // 这条很值：派蒙 / 旅行者 在观测枢没有角色页，全靠这个才点得出去。
+  const questIdByTitle = (() => {
+    const cache = new Map();
+    return (title) => {
+      const t = String(title || '').trim();
+      if (!t) return null;
+      if (cache.has(t)) return cache.get(t);
+      let v = null;
+      try {
+        const r = one('SELECT quest_id FROM dialogue_groups WHERE quest_title = ? AND quest_id IS NOT NULL LIMIT 1', t);
+        v = r ? r.quest_id : null;
+      } catch { /* 忽略 */ }
+      cache.set(t, v);
+      return v;
+    };
+  })();
+  /** 给一条 source 补官方原文地址；认不出来就返回空串。 */
+  function sourceUrlOf(s) {
+    if (!s) return '';
+    if (s.sourceUrl) return s.sourceUrl;
+    if (s.obcId != null) return obcSourceUrl(s.obcId);
+    if (s.characterId != null) {
+      const u = obcSourceUrl(obcIdOfCharacter(s.characterId));
+      // 角色在观测枢没有页面时（派蒙 / 旅行者 / 戴因斯雷布…共 9 个）继续往下退。
+      if (u) return u;
+    }
+    if (s.questId != null) {
+      const u = obcSourceUrl(s.questId);
+      if (u) return u;
+    }
+    if (s.bookId != null) {
+      const u = obcSourceUrl(obcIdOfBook(s.bookId));
+      if (u) return u;
+    }
+    // 最后一道：从 heading 的第一段反查任务词条。
+    if (typeof s.heading === 'string' && s.heading.includes(' · ')) {
+      const u = obcSourceUrl(questIdByTitle(s.heading.split(' · ')[0]));
+      if (u) return u;
+    }
+    return '';
+  }
 
   // ---------------------------------------------------------- 实体索引
   // 角色名的所有写法（中文名 / 英文名 / 拼音 / 别名）-> 角色记录
@@ -290,7 +378,7 @@ export function createRetriever(db, obcDb = null) {
     if (words.length) {
       const like = words.map(() => 'l.text LIKE ?').join(' OR ');
       rows = all(
-        `SELECT l.id, l.heading, l.speaker, l.text, g.chapter, g.quest_title, g.quest_type
+        `SELECT l.id, l.heading, l.speaker, l.text, g.chapter, g.quest_title, g.quest_type, g.quest_id
          FROM dialogue_lines l JOIN dialogue_groups g ON g.id = l.group_id
          WHERE g.character_id = ? AND (${like})
          LIMIT 400`,
@@ -299,7 +387,7 @@ export function createRetriever(db, obcDb = null) {
     }
     if (!rows.length) {
       rows = all(
-        `SELECT l.id, l.heading, l.speaker, l.text, g.chapter, g.quest_title, g.quest_type
+        `SELECT l.id, l.heading, l.speaker, l.text, g.chapter, g.quest_title, g.quest_type, g.quest_id
          FROM dialogue_lines l JOIN dialogue_groups g ON g.id = l.group_id
          WHERE g.character_id = ? AND length(l.text) > 12
          ORDER BY l.id LIMIT 200`,
@@ -319,6 +407,10 @@ export function createRetriever(db, obcDb = null) {
       heading: r.heading,
       text: clip(r.text, textCap),
       url: `#/character/${c.id}?tab=dialogue`,
+      // 任务的观测枢词条 id。角色页优先（见 sourceUrlOf），但 旅行者 / 派蒙 /
+      // 戴因斯雷布 等 9 个角色在观测枢没有页面，只有这个能让他们点得出去 ——
+      // 而派蒙一个人就占了全库 35% 的台词。
+      questId: r.quest_id,
     }));
   }
 
@@ -471,7 +563,7 @@ export function createRetriever(db, obcDb = null) {
     const names = [...new Set(entities.flatMap(e => [e.name, e.matched]).filter(n => n && n.length >= 2 && n !== '(承接上文)'))];
     const focus = [...ids.map(() => 'g.character_id=?'), ...names.map(() => 'l.speaker=?'), ...names.map(() => 'l.text LIKE ?')];
     const match = terms.map(() => 'l.text LIKE ?');
-    const rows = all(`SELECT l.id,l.group_id,l.ord,l.speaker,l.text,g.quest_title,g.chapter FROM dialogue_lines l JOIN dialogue_groups g ON g.id=l.group_id WHERE (${match.join(' OR ')})${focus.length ? ` AND (${focus.join(' OR ')})` : ''} LIMIT 1600`, ...terms.map(t => `%${t}%`), ...ids, ...names, ...names.map(n => `%${n}%`));
+    const rows = all(`SELECT l.id,l.group_id,l.ord,l.speaker,l.text,g.quest_title,g.chapter,g.quest_id FROM dialogue_lines l JOIN dialogue_groups g ON g.id=l.group_id WHERE (${match.join(' OR ')})${focus.length ? ` AND (${focus.join(' OR ')})` : ''} LIMIT 1600`, ...terms.map(t => `%${t}%`), ...ids, ...names, ...names.map(n => `%${n}%`));
     const unique = new Map();
     for (const r of rows) if (!unique.has(r.text)) unique.set(r.text, r);
     const ranked = [...unique.values()].map(r => ({ ...r, rank: terms.reduce((n,t) => n + (r.text.includes(t) ? Math.min(6,t.length) : 0), 0) + (names.includes(r.speaker) ? 2 : 0) })).sort((a,b) => b.rank-a.rank || a.id-b.id);
@@ -481,7 +573,11 @@ export function createRetriever(db, obcDb = null) {
     for (const r of ranked) if (!seen.has(r.id) && selected.length < 10) { selected.push(r); seen.add(r.id); }
     return selected.slice(0,10).map(r => {
       const context = all('SELECT speaker,text FROM dialogue_lines WHERE group_id=? AND ord BETWEEN ? AND ? ORDER BY ord', r.group_id, r.ord-1, r.ord+1);
-      return { type:'dialogue', id:r.id, sourceId:`dialogue:${r.id}`, title:`${r.quest_title || r.chapter || '任务剧情'} · ${r.speaker}`, text:clip(context.map(x => `${x.speaker}：${x.text}`).join('\n'),620), authority:'official' };
+      // questId 是这条台词所属任务在观测枢的词条 id（实测 932/932 个去重 quest_id
+      // 全部真实存在），比角色页更贴切：这是「剧情对话」的出处。
+      // 尤其 旅行者 / 派蒙 在观测枢**没有角色页**，只有挂到任务词条才点得出去 ——
+      // 而这两个角色的台词占了全库的 43%。
+      return { type:'dialogue', id:r.id, sourceId:`dialogue:${r.id}`, questId:r.quest_id, title:`${r.quest_title || r.chapter || '任务剧情'} · ${r.speaker}`, text:clip(context.map(x => `${x.speaker}：${x.text}`).join('\n'),620), authority:'official' };
     });
   }
 
@@ -709,7 +805,13 @@ export function createRetriever(db, obcDb = null) {
     // 多实体时放宽总条数：否则 13 个实体 × 2 条正好把 MAX_SOURCES 占满，
     // 全文兜底与观测枢一条都进不来。反正 assembleContext 还会按预算再裁一次。
     const maxSources = many ? MAX_SOURCES + 8 : MAX_SOURCES;
-    const final = deduped.slice(0, maxSources).map((s, i) => ({ ...s, ref: i + 1 }));
+    const final = deduped.slice(0, maxSources).map((s, i) => ({
+      ...s,
+      ref: i + 1,
+      // 统一补官方原文地址（见本函数开头的「回官方原文」）。放在这里是因为
+      // 这是所有 source 汇合的唯一出口，改一处即可覆盖全部来源类型。
+      sourceUrl: sourceUrlOf(s),
+    }));
 
     // ④ 检索覆盖回报：哪些实体取到了资料、哪些一条都没取到。
     // 这是「不许说知识库里没有」的事实依据 —— 能列出来的名字，库里一定有。

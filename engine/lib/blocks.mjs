@@ -23,12 +23,20 @@ import { OBC_PICK_KINDS, OBC_ICON_KINDS, OBC_DOMAIN_TRIGGERS, obcLabel } from '.
 // 观测枢原文地址（回链官方来源；obc.mjs 不反向依赖本文件，无循环）
 import { obcSourceUrl } from './obc.mjs';
 import { canonicalizeNames } from './nicknames.mjs';
+// 练度规划引擎。plan.mjs 只依赖 obc-modules / obc / resin-cost，不反向依赖本文件。
+import { buildPlan } from './plan.mjs';
+// 技能注册表。意图路由、优先级、互斥全部迁到那边（数据驱动），
+// 本文件只保留**怎么造块**。注册表不 import 本文件，所以无循环依赖。
+import { matchSkills, resolveSkills, buildFromSkills, needsCharacterSet } from './skills/index.mjs';
+import { run as runStats } from './skills/stats.mjs';
 
-/** 六种块。客户端按 kind 分派渲染器。 */
+/** 客户端按 kind 分派渲染器。 */
 export const BLOCK_KINDS = [
   'image', 'voice-list', 'relation-graph', 'stat-table', 'list',
   'talent', 'constellation', 'ascension',
   'video-scenes',
+  // 练度规划。由 POST /v1/plan 产出，形状见 lib/plan.mjs 的 buildPlan 返回。
+  'plan',
 ];
 
 // 数据来源说明：块里的结构化数据全部来自观测枢**页面 JSON 的模块**，
@@ -50,45 +58,29 @@ const LIMIT = {
 };
 
 // ------------------------------------------------------------------ 意图路由
-// 注意：一条问题可以命中多个意图（「胡桃的立绘和语音」），所以返回数组。
-// 顺序即优先级 —— **具体的排前面，笼统的排后面**。
-// 「圣遗物推荐」必须命中 artifact 而不是 build，否则会把武器也一起端出来（实测踩过）。
-const RULES = [
-  { id:'video', re:[/\bpv\b/i,/视频/,/预告/,/过场动画/] },
-  { id: 'art', re: [/立绘/, /头像/, /图标/, /画像/, /原画/, /长什么样/, /长啥样/, /什么样子/, /什么模样/, /形象/, /外观/, /图片/, /照片/, /截图/, /看看.*样/] },
-  // 「这个角色是谁」—— 给一张紧凑立绘 + 基础档案（元素/武器类型/生日/CV/命座）。
-  // 单列一条是因为它以前**没有任何意图命中**：问「胡桃是谁」「介绍一下胡桃」
-  // 一个块都不出，而问「胡桃的推荐武器」反而会附一张立绘 —— 正好反了。
-  { id: 'profile', re: [/是谁/, /什么人/, /什么角色/, /介绍/, /资料/, /档案/, /基本信息/, /这个人/, /什么来历/, /角色卡/, /图鉴/] },
-  { id: 'voice', re: [/语音/, /配音/, /声优/, /说过什么/, /说过啥/, /口头禅/, /台词/, /\bcv\b/i] },
-  { id: 'relation', re: [/关系/, /和谁/, /跟谁/, /认识谁/, /亲友/, /师徒/, /同伴/, /羁绊/, /交集/, /关联/, /联系/] },
-  // —— 以下五个是「角色养成」域，从具体到笼统
-  { id: 'constellation', re: [/命座/, /命之座/, /几命/, /满命/, /一命/, /二命/, /六命/] },
-  { id: 'talent', re: [/天赋/, /技能/, /倍率/, /元素战技/, /元素爆发/, /普通攻击/, /普攻/, /\be技能\b/i, /\bq技能\b/i] },
-  { id: 'ascension', re: [/突破材料/, /培养材料/, /升级材料/, /进阶材料/, /要什么材料/, /需要什么材料/, /材料.*(刷|打|获取|在哪)/, /怎么突破/, /突破要/] },
-  { id: 'weapon', re: [/武器/, /用什么剑/, /用什么枪/, /带什么/, /适合.*(武器|装备)/] },
-  { id: 'artifact', re: [/圣遗物/, /套装/, /词条/, /沙漏/, /杯子/, /头冠/] },
-  { id: 'build', re: [/配装/, /培养/, /怎么练/, /配队/, /阵容/, /搭配/, /推荐/, /面板/, /数值/, /属性/] },
-  { id: 'list', re: [/有哪些/, /都有谁/, /一共.*(多少|几)/, /多少个/, /多少位/, /多少把/, /列表/, /全部/, /所有/, /列举/, /盘点/, /清单/] },
-];
+//
+// 原先这里有一个 RULES 数组（13 条正则）+ 散落在 buildBlocks 里的一串
+// `if (intent === 'build' && ...) continue` 抑制规则。已经整体迁到
+// **lib/skills/index.mjs** —— 优先级成了数字、互斥成了数据、技能目录成了可展示的元数据。
+// 本文件从此只管「怎么造块」，不管「该不该造」。加新技能不用改这里。
 
 /**
  * 判断问题在要哪几类结构化结果。
- * @returns {{ intents: string[], matched: Record<string,string> }} matched 记录命中的原词，便于排查
+ *
+ * 实现已迁到技能注册表（lib/skills/index.mjs）。**返回值契约不变** ——
+ * v1-blocks-smoke 有 60+ 条断言钉着它，所以这里只做形状适配：
+ *   intents  命中技能的 id，按优先级降序
+ *   matched  id → 命中的原词
  */
 export function routeIntents(question) {
   const s = String(question || '');
+  let hits;
+  try { hits = matchSkills(s); } catch { return { intents: [], matched: {} }; }
   const intents = [];
   const matched = {};
-  for (const r of RULES) {
-    for (const re of r.re) {
-      const m = s.match(re);
-      if (m) {
-        intents.push(r.id);
-        matched[r.id] = m[0];
-        break;
-      }
-    }
+  for (const h of hits) {
+    intents.push(h.skill.id);
+    matched[h.skill.id] = h.matched;
   }
   return { intents, matched };
 }
@@ -428,6 +420,98 @@ function buildAscension(v1, char) {
 }
 
 /**
+ * ⑩ 练度规划。
+ *
+ * 和 buildAscension 的区别：那个是「这个角色 1→90 要哪些材料」的**静态全表**；
+ * 这个是「**你这个号**从当前等级练到目标等级还差什么」—— 已过的突破段不列，
+ * 共用材料合并计费，附树脂与天数。
+ *
+ * 这是「技能式」入口：用户在聊天里正常说一句话就能触发，不用先去哪个面板配置。
+ */
+function parsePlanIntent(question, char, entities = [], roster = []) {
+  const s = canonicalizeNames(String(question || ''));
+
+  // ── 等级 ──
+  // 先抓「练到 90 级」这种明确的**目标**，剩下的数字才是当前等级。
+  // 顺序很重要：不先摘掉目标，它会被当成当前等级。
+  let targetLevel = 90;
+  let rest = s;
+  const toM = s.match(/(?:练到|升到|养到|拉到|到|目标)\s*(\d{1,3})\s*级/);
+  if (toM) {
+    targetLevel = Number(toM[1]);
+    rest = s.replace(toM[0], ' ');
+  }
+  const levels = [];
+  const re = /(\d{1,3})\s*级/g;
+  let mm;
+  while ((mm = re.exec(rest)) !== null) levels.push(Number(mm[1]));
+  // 没有「到 X 级」但出现了两个数字时，把大的当目标（「胡桃 80 90」）
+  if (!toM && levels.length >= 2) {
+    targetLevel = Math.max(...levels);
+    levels.splice(levels.indexOf(targetLevel), 1);
+  }
+  const curLevel = levels.length ? levels[0] : null;
+
+  // ── 角色 ──
+  // 优先级：问题里点名的 > 客户端带来的清单 > 检索层解析到的那个角色。
+  // 之所以让「点名的」压过清单，是因为用户临时问别人时不该被自己的清单挡住。
+  const named = [];
+  for (const e of entities || []) {
+    const id = e && (e.id != null ? e.id : e.charId);
+    const nm = e && (e.name || e.charName);
+    if (id != null && nm && /^[\u4e00-\u9fff·A-Za-z]{1,20}$/.test(nm) && !named.some((x) => x.charId === id)) {
+      named.push({ charId: Number(id), name: String(nm), level: curLevel || 1 });
+    }
+  }
+  let picked = named;
+  if (!picked.length && roster && roster.length) {
+    picked = roster.map((r) => ({
+      charId: Number(r.charId), name: String(r.name || ''),
+      level: Number.isFinite(r.level) ? r.level : (curLevel || 1),
+    }));
+  }
+  if (!picked.length && char && char.row) {
+    picked = [{ charId: char.row.id, name: char.row.name, level: curLevel || 1 }];
+  }
+  if (!picked.length) return null;
+
+  // ── 偏好 ──
+  let prefer = 'balanced';
+  if (/先练|主c|输出|站场|主力|大c/i.test(s)) prefer = 'dps';
+  else if (/辅助|治疗|奶|护盾|盾|增伤/.test(s)) prefer = 'support';
+  else if (/收尾|快好了|快满|差的少|先完成/.test(s)) prefer = 'completion';
+
+  return { roster: picked, targetLevel, prefer };
+}
+
+function buildPlanBlock(v1, question, char, entities, roster) {
+  const parsed = parsePlanIntent(question, char, entities, roster);
+  if (!parsed || !parsed.roster.length) return null;
+
+  let result;
+  try {
+    result = buildPlan(v1, {
+      roster: parsed.roster.map((r) => ({ charId: r.charId, level: r.level })),
+      target: { level: parsed.targetLevel },
+      prefer: parsed.prefer,
+    });
+  } catch {
+    // 规划是纯计算，出错说明数据形状变了 —— 不抛给用户，只是这一轮不出块
+    return null;
+  }
+  if (!result || !result.ok || !result.steps.length) return null;
+
+  // 把 planner 的返回摊平进块里：客户端 render() 读的就是这些字段
+  // （steps / materials / summary / conflicts / skipped / notes / rules），
+  // 这样聊天里的块和抽屉里的结果是**同一份渲染代码**画的。
+  return {
+    kind: 'plan',
+    title: `练度规划 · ${result.steps.map((s) => s.charName).join('、')}`,
+    ...result,
+  };
+}
+
+/**
  * ⑤ 列表：角色 / 观测枢图鉴 / 书籍。
  * 复用 v1.query（那层已被 39 项覆盖测试打过），不重复写 SQL。
  */
@@ -482,18 +566,73 @@ function buildList(v1, question) {
  * @param {{v1:object, question:string, anchors?:Array, entities?:Array}} ctx
  * @returns {Array<object>} 块数组，可能为空
  */
-export function buildBlocks({ v1, question, anchors = [], entities = [], videoIndex = null }) {
+/**
+ * 每个技能「怎么造块」。键是技能 id，值是 ctx → block。
+ *
+ * 这些 builder 留在本文件，是因为它们要复用 targetCharacter / modulesOf / LIMIT
+ * 这些内部工具。注册表（lib/skills/index.mjs）只放**元数据与路由**，不认识这些函数 ——
+ * 所以由本文件把它自己的 builder 传进去，避免循环依赖。
+ *
+ * 新技能如果不需要这些内部工具（比如 stats），就在 lib/skills/ 里自带 run，
+ * **完全不用改本文件** —— 那才是注册表要解决的问题。
+ */
+const SKILL_HANDLERS = {
+  art: (c) => buildImage(c.v1, c.char, false),
+  profile: (c) => {
+    // 「是谁 / 介绍一下」只要基础档案。buildStat 会把养成数据（武器推荐、
+    // 圣遗物推荐）一起端出来，那不是这个问题要的 —— 问什么给什么。
+    const block = buildStat(c.v1, c.char, null);
+    if (!block) return null;
+    block.tables = [];
+    // 标题从 buildStat 算好的那个派生，别自己拼 ——
+    // 外面这个 char 对象的字段名和 buildStat 内部用的不是一回事，
+    // 直接 char.name 会得到 undefined（踩过）。
+    block.title = String(block.title).replace(/\s*·\s*.*$/, ' · 基础档案');
+    block.source = '';
+    return block;
+  },
+  voice: (c) => buildVoice(c.v1, c.char),
+  relation: (c) => buildRelation(c.v1, c.char),
+  weapon: (c) => buildStat(c.v1, c.char, '武器推荐'),
+  artifact: (c) => buildStat(c.v1, c.char, '圣遗物推荐'),
+  build: (c) => buildStat(c.v1, c.char, null),
+  talent: (c) => buildTalent(c.v1, c.char),
+  constellation: (c) => buildConstellation(c.v1, c.char),
+  ascension: (c) => buildAscension(c.v1, c.char),
+  plan: (c) => buildPlanBlock(c.v1, c.question, c.char, c.entities, c.roster),
+  list: (c) => buildList(c.v1, c.question),
+  video: (c) => {
+    if (!c.videoIndex || !c.videoIndex.configured) return null;
+    const name = c.char?.row?.name || (c.entities || []).find((e) => e.name)?.name || '';
+    const items = [...c.videoIndex.entries.entries()]
+      .map(([key, item]) => {
+        const [entryId, videoIndex] = key.split(':').map(Number);
+        return { entryId, videoIndex, title: item.title };
+      })
+      .filter((item) => !name || item.title.includes(name))
+      .slice(0, 6);
+    if (!items.length) return null;
+    return { kind: 'video-scenes', title: 'PV 片段选择', items, total: items.length, source: '米游社观测枢' };
+  },
+};
+
+/** 自带 run 的技能（不进 SKILL_HANDLERS，因为它们不需要本文件的内部工具）。 */
+const SKILL_MODULES = {
+  stats: runStats,
+};
+
+export function buildBlocks({ v1, question, anchors = [], entities = [], videoIndex = null, roster = [], skill = '' }) {
   question = canonicalizeNames(question);
   const out = [];
-  let routed;
-  try { routed = routeIntents(question); } catch { return out; }
-  if (!routed.intents.length) return out;
+  let hits;
+  // skill：用户在界面上明确选的技能（前端输入框上方那个 chip）。
+  // 传进来就排在最前，不再靠正则猜他想要什么 —— 他已经说了。
+  try { hits = resolveSkills(matchSkills(question, skill), skill); } catch { return out; }
+  if (!hits.length) return out;
 
   // 需要「某个角色」的几种块共用同一个解析结果
   let char = null;
-  const NEED_CHAR = ['art', 'profile', 'voice', 'relation', 'weapon', 'artifact', 'build', 'talent', 'constellation', 'ascension'];
-  const needsChar = routed.intents.some((i) => NEED_CHAR.includes(i));
-  if (needsChar) {
+  if (needsCharacterSet(hits)) {
     try { char = targetCharacter(v1, anchors, entities); } catch { char = null; }
   }
 
@@ -508,65 +647,21 @@ export function buildBlocks({ v1, question, anchors = [], entities = [], videoIn
   //   结果用户问「胡桃的推荐武器」，收到的是胡桃立绘 + 一堆武器名字，
   //   直接反馈「不要把立绘给我，问什么给什么，不多不少」。
   const ASPECT_INTENTS = ['weapon', 'artifact', 'build', 'talent', 'constellation',
-    'ascension', 'voice', 'relation'];
-  const aspectAsk = routed.intents.some((i) => ASPECT_INTENTS.includes(i));
-  if (char && !routed.intents.includes('art') && !aspectAsk) {
+    'ascension', 'voice', 'relation', 'plan'];
+  const aspectAsk = hits.some((h) => ASPECT_INTENTS.includes(h.skill.id));
+  if (char && !hits.some((h) => h.skill.id === 'art') && !aspectAsk) {
     try {
       const img = buildImage(v1, char, true);
       if (img) { img.reason = '角色锚点'; out.push(img); }
     } catch { /* 图片失败不影响别的块 */ }
   }
 
-  for (const intent of routed.intents) {
-    // 「推荐」这种笼统词会和具体词同时命中（「圣遗物推荐」= artifact + build）。
-    // 具体项已经单独出块了，笼统的 build 再出一次就会把武器也端出来 —— 实测用户会问
-    // 「我要圣遗物，你怎么把武器也给我了」。所以具体项命中时压掉 build。
-    if (intent === 'build' && routed.intents.some((i) => i === 'weapon' || i === 'artifact' || i === 'ascension')) continue;
-
-    let block = null;
-    try {
-      if (intent === 'art') block = buildImage(v1, char, false);
-      else if (intent === 'profile') {
-        // 「是谁 / 介绍一下」只要基础档案。buildStat 会把养成数据（武器推荐、
-        // 圣遗物推荐）一起端出来，那不是这个问题要的 —— 问什么给什么。
-        block = buildStat(v1, char, null);
-        if (block) {
-          block.tables = [];
-          // 标题从 buildStat 算好的那个派生，别自己拼 ——
-          // 外面这个 char 对象的字段名和 buildStat 内部用的不是一回事，
-          // 直接 char.name 会得到 undefined（踩过）。
-          block.title = String(block.title).replace(/\s*·\s*.*$/, ' · 基础档案');
-          block.source = '';
-        }
-      }
-      else if (intent === 'voice') block = buildVoice(v1, char);
-      else if (intent === 'relation') block = buildRelation(v1, char);
-      else if (intent === 'weapon') block = buildStat(v1, char, '武器推荐');
-      else if (intent === 'artifact') block = buildStat(v1, char, '圣遗物推荐');
-      else if (intent === 'build') block = buildStat(v1, char, null);
-      else if (intent === 'talent') block = buildTalent(v1, char);
-      else if (intent === 'constellation') block = buildConstellation(v1, char);
-      else if (intent === 'ascension') block = buildAscension(v1, char);
-      else if (intent === 'list') block = buildList(v1, question);
-      else if (intent === 'video' && videoIndex?.configured) {
-        const name = char?.row?.name || entities.find(e => e.name)?.name || '';
-        const items = [...videoIndex.entries.entries()]
-          .map(([key, item]) => {
-            const [entryId, videoIndex] = key.split(':').map(Number);
-            return { entryId, videoIndex, title: item.title };
-          })
-          .filter((item) => !name || item.title.includes(name))
-          .slice(0, 6);
-        if(items.length)block={kind:'video-scenes',title:'PV 片段选择',items,total:items.length,source:'米游社观测枢'};
-      }
-    } catch { block = null; }
-    if (block) {
-      block.reason = routed.matched[intent] || intent;
-      // 同一回合里已经有图时，不要再塞一张重复的
-      if (block.kind === 'image' && out.some((b) => b.kind === 'image')) continue;
-      out.push(block);
-    }
-  }
+  out.push(...buildFromSkills(
+    hits,
+    { v1, question, char, entities, roster, videoIndex, anchors },
+    SKILL_HANDLERS,
+    SKILL_MODULES,
+  ));
   return out;
 }
 
@@ -597,6 +692,16 @@ export function blockHintForPrompt(blocks, question = '') {
     if (b.kind === 'talent') return `天赋表（${b.title}）：${b.total} 个天赋${b.withMultipliers ? '（含倍率表）' : ''}已展示`;
     if (b.kind === 'constellation') return `命之座（${b.title}）：${b.total} 个命座已展示`;
     if (b.kind === 'ascension') return `培养材料表（${b.title}）：${b.total} 个突破阶段的材料已展示`;
+    if (b.kind === 'plan') {
+      // 规划块已经把「差什么材料、多少摩拉、多少树脂、几天」全摆在界面上了。
+      // 模型这里最容易犯的错是把同一份材料再列一遍 —— 明确禁止。
+      const names = (b.steps || []).map((s) => `${s.charName} ${s.from}→${s.to}`).join('、');
+      const su = b.summary || {};
+      return `练度规划（${b.title}）：已算出 ${names}，共 ${(b.materials || []).length} 种材料、`
+        + `摩拉 ${su.mora || 0}、树脂 ${su.resin || 0}（${su.resinIsUpperBound ? '上界' : '估算'}）、约 ${su.days || 0} 天。`
+        + `**不要**再逐条复述材料名、数量、摩拉或树脂数字；只补充：为什么是这个顺序、哪些材料能一起刷、`
+        + `以及计划覆盖不到的注意事项（例如怪物掉落没给树脂数）`;
+    }
     if (b.kind === 'list') return `列表（${b.title}）：共 ${b.total} 条，已用表格展示`;
     return b.title;
   });

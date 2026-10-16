@@ -110,7 +110,15 @@ const build = (q) => buildBlocks({ v1, question: q, anchors: v1.findAnchors(q), 
 const kindsOf = (bs) => bs.map((b) => b.kind);
 const one = (q, kind) => build(q).find((b) => b.kind === kind);
 
-ok('BLOCK_KINDS 覆盖全部九种', BLOCK_KINDS.length === 9 && BLOCK_KINDS.includes('video-scenes'), BLOCK_KINDS.join(','));
+// 十种：原有九种 + plan（练度规划）。断言写成「包含」而不是「恰好等于」，
+// 这样**下一个技能加块类型时不会又在这里绊一跤** —— 数量本身不是契约，
+// 「每个已实现的块类型都登记在册」才是。
+ok('BLOCK_KINDS 覆盖全部已实现类型',
+  BLOCK_KINDS.length >= 10
+  && ['image', 'voice-list', 'relation-graph', 'stat-table', 'list',
+      'talent', 'constellation', 'ascension', 'video-scenes', 'plan']
+    .every((k) => BLOCK_KINDS.includes(k)),
+  BLOCK_KINDS.join(','));
 
 // ① image
 {
