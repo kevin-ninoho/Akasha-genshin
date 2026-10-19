@@ -75,14 +75,14 @@
 
 .sk-grid {
   display: grid; gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(238px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
 }
 
 /* 卡片本身是 button（能点的语义），所以要把浏览器默认样式全压掉 */
 .sk-card {
   display: block; width: 100%; text-align: left; cursor: pointer;
-  border: 1px solid var(--border); border-radius: 12px;
-  background: var(--panel); padding: 12px 13px;
+  border: 1px solid var(--border); border-radius: 13px;
+  background: var(--panel); padding: 14px 15px;
   font-family: inherit; color: var(--text);
   transition: border-color .15s var(--ease), background .15s var(--ease), transform .12s var(--ease);
 }
@@ -94,25 +94,40 @@
 }
 .sk-card.sk-off:hover { border-color: var(--border); background: transparent; transform: none; }
 
-.sk-card-h { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; flex-wrap: wrap; }
-.sk-ico2 { font-size: 15px; line-height: 1; }
-.sk-lb { font-size: 13px; font-weight: 600; }
+.sk-card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+
+/* 角色头像作为技能图标。观测枢给的就是 256×256 头肩特写，
+   圆角一裁就是「精准框住头像」，不用再做任何裁切。
+   object-position: center top 保证脸始终在框内（不同角色构图略有高低）。 */
+.sk-av {
+  width: 44px; height: 44px; border-radius: 12px;
+  object-fit: cover; object-position: center top; flex: none;
+  background: var(--panel-2);
+  /* 浅色主题下头像边缘会糊在面板上，加一圈细描边分开 */
+  box-shadow: 0 0 0 1px var(--border);
+}
+/* 拿不到头像时退回 emoji */
+.sk-emoji { font-size: 28px; line-height: 1; width: 44px; text-align: center; flex: none; }
+
+.sk-lb { font-size: 15.5px; font-weight: 700; letter-spacing: .01em; }
 .sk-badge {
-  font-size: 10px; padding: 0 6px; border-radius: 20px;
+  font-size: 11px; padding: 1px 8px; border-radius: 20px;
   border: 1px solid currentColor; line-height: 1.7; margin-left: auto;
+  white-space: nowrap;
 }
 .sk-badge.sk-ready { color: var(--ok); }
 .sk-badge.sk-beta { color: var(--accent); }
 .sk-badge.sk-planned { color: var(--muted); }
 
-.sk-ds { font-size: 11.5px; color: var(--muted); line-height: 1.6; min-height: 2.6em; }
+.sk-ds { font-size: 12.5px; color: var(--muted); line-height: 1.65; min-height: 2.8em; }
 .sk-eg {
-  margin-top: 8px; font-size: 11px; color: var(--accent);
-  background: var(--bg-2); border-radius: 6px; padding: 4px 8px;
+  margin-top: 9px; font-size: 12px; color: var(--accent);
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px;
+  padding: 5px 9px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sk-card.sk-off .sk-eg { color: var(--muted); }
-.sk-ext { margin-top: 6px; font-size: 10.5px; color: var(--danger); }
+.sk-ext { margin-top: 6px; font-size: 11px; color: var(--danger); }
 
 /* ---------------------------------------------------------------- 已选技能 chip */
 

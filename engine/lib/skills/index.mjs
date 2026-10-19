@@ -364,6 +364,47 @@ export function needsCharacterSet(hits) {
 
 // ------------------------------------------------------------------ 目录
 
+/**
+ * 给每个技能分配一张角色头像。
+ *
+ * 需求是「每次用户打开客户端，图标都不一样」。所以不固定、也不存库 ——
+ * 由客户端每次启动生成一个随机 seed 传上来，这里用 seed 做**确定性洗牌**。
+ * 同一个 seed 同一份结果（刷新页面不变），换 seed 就换一批（重启客户端就换）。
+ *
+ * 为什么不在服务端每次随机：那样刷新页面图标就跳，用户会觉得界面在抽搐。
+ *
+ * 图标池来自 characters 里有落盘头像的那些（256×256 官方头肩特写）。
+ * 敌人图标是游戏内截图（256×123 带背景），做图标很丑，不用；NPC 没有落盘图标。
+ *
+ * @param {Array} skills  技能列表（用 id 定位）
+ * @param {Array<{id:number,name:string}>} pool  可选角色
+ * @param {number} seed
+ * @returns {Record<string, string>}  skillId → 头像 URL
+ */
+export function assignIcons(skills, pool, seed) {
+  const out = {};
+  if (!Array.isArray(pool) || !pool.length) return out;
+  // mulberry32：小而够用的确定性 PRNG。用 Math.random 就没法「同 seed 同结果」了。
+  let a = (Number(seed) >>> 0) || 1;
+  const rnd = () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const deck = pool.slice();
+  for (let i = deck.length - 1; i > 0; i--) {     // Fisher-Yates
+    const j = Math.floor(rnd() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  // 技能数（28）远小于角色数（123），洗完顺序取，保证**不重复**
+  (skills || []).forEach((s, i) => {
+    const c = deck[i % deck.length];
+    if (c) out[s.id] = `/v1/asset/character/${c.id}?size=icon`;
+  });
+  return out;
+}
+
 /** 喂给客户端画技能面板。不含 patterns/run 这些内部字段。 */
 export function skillCatalog() {
   return {

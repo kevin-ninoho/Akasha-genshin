@@ -12,8 +12,10 @@ import { MediaJobs } from './lib/media-jobs.mjs';
 import { loadVideoIndex } from './lib/video-index.mjs';
 import { corpusRevision } from './lib/corpus-revision.mjs';
 import { loadConfig, resolveProvider, resolveThinking } from './chat/llm.mjs';
+// 联网兜底：库内检索为空时改查网络。默认关闭，见 lib/websearch.mjs 的说明。
+import { searchWeb, renderWebContext, resolveConfig as resolveWebSearchConfig } from './lib/websearch.mjs';
 import { buildPlan } from './lib/plan.mjs';
-import { skillCatalog } from './lib/skills/index.mjs';
+import { skillCatalog, assignIcons, SKILLS } from './lib/skills/index.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.KB_DATA_DIR || path.join(HERE, 'data');
@@ -185,7 +187,7 @@ const media = new MediaJobs({root:process.env.KB_MEDIA_CACHE || path.join(DATA,'
   return videoIndex.entries.get(`${id}:${index}`) || null;
 }});
 let statusCache = null;
-const HANDLED = new Set(['meta', 'query', 'record', 'asset', 'retrieve', 'chat', 'health', 'usage', 'domains', 'demo', 'videos', 'media', 'status', 'plan', 'skills']);
+const HANDLED = new Set(['meta', 'query', 'record', 'asset', 'retrieve', 'chat', 'health', 'usage', 'domains', 'demo', 'videos', 'media', 'status', 'plan', 'skills', 'skill-icons']);
 
 async function routeV1(req, res, url, seg) {
   const head = seg[1] || '';
@@ -194,7 +196,7 @@ async function routeV1(req, res, url, seg) {
   }
   // 方法校验：GET 类接口不接受 POST，POST 类接口不接受 GET。
   // 不加这一层的话 POST /v1/query 会被当成普通查询静默放行。
-  const GET_ONLY = new Set(['meta', 'domains', 'query', 'record', 'asset', 'demo', 'status', 'skills']);
+  const GET_ONLY = new Set(['meta', 'domains', 'query', 'record', 'asset', 'demo', 'status', 'skills', 'skill-icons']);
   const POST_ONLY = new Set(['retrieve', 'chat', 'usage', 'plan']);
   if (GET_ONLY.has(head) && req.method !== 'GET' && req.method !== 'HEAD') {
     throw new ApiError(405, 'method_not_allowed', `/v1/${head} 只接受 GET`);
@@ -315,6 +317,22 @@ async function routeV1(req, res, url, seg) {
     const rec = v1.getRecord(kind, id);
     if (!rec) throw new ApiError(404, 'record_not_found', `没有 ${kind} #${id}`);
     return sendJson(res, rec);
+  }
+
+  if (head === 'skill-icons') {
+    // 技能图标：用角色头像，每次客户端启动换一批。
+    // seed 由客户端生成（重开客户端 = 新 seed = 新头像）；同 seed 同结果，刷新页面不会跳。
+    //
+    // 图标池只取**有落盘头像**的角色（256×256 官方头肩特写）。
+    // 敌人图标是游戏内截图（256×120 带背景），做图标很丑；NPC 没有落盘图标 —— 都不入池。
+    const seed = Number(url.searchParams.get('seed')) || 1;
+    let pool = [];
+    try {
+      pool = v1.db.prepare(
+        'SELECT id, name FROM characters WHERE game_id = 1 AND has_icon = 1 ORDER BY id',
+      ).all();
+    } catch { pool = []; }
+    return sendJson(res, { seed, count: pool.length, icons: assignIcons(SKILLS, pool, seed) });
   }
 
   if (head === 'skills') {
@@ -441,6 +459,51 @@ async function routeV1(req, res, url, seg) {
       sessionId, message, think, signal: ac.signal,
       obcDb: v1.obc,
     };
+
+    // ---- 联网兜底预检：库内真的空，就先搜网，把结果作为额外上下文带进去
+    //
+    // 为什么放在生成前、而不是在闸门里现场搜：
+    //   闸门在 `for await (const ev of it)` 内部，那里要重启生成器很别扭。
+    //   这里先独立跑一次检索判断，能提前把 webContext 交给 runChat，
+    //   闸门那边只需「有 webContext 就不拒答」。代价是检索跑两次（约 200ms）。
+    //
+    // 只在「库内答不出」时才联网 —— 官方数据优先，这条不能破。
+    let webSources = [];
+    // 联网兜底配置（默认关闭）。从 llm.config.json 的 webSearch 段读，环境变量可覆盖。
+    let webSearchCfg = { enabled: false };
+    try {
+      const llmCfg = loadConfig(CHAT_DIR);
+      const wsCfg = (llmCfg && llmCfg.webSearch) || {};
+      // key 继承：webSearch 没单独配 key 就用模型那把。
+      // DeepSeek 的 Search API 和 chat 是**同一个 key、同一个域名**，不该让用户填两遍。
+      webSearchCfg = resolveWebSearchConfig({ ...wsCfg, apiKey: wsCfg.apiKey || (llmCfg && llmCfg.apiKey) || '' });
+    } catch { /* 读不到就当关闭 */ }
+    if (webSearchCfg.enabled) {
+      try {
+        const pre = doRetrieve(message, {});
+        // ⚠ doRetrieve 返回的是 `kept`（保留下来的资料），**没有** sources 字段。
+        // 写成 pre.sources 会永远是 undefined → 闸门永远判定「库内为空」
+        // → 每句话都去联网。这里必须用 kept。
+        const preGate = assessRetrieval({
+          sources: pre.kept || [], anchors: pre.anchors || [], coverage: pre.coverage,
+        });
+        // 什么时候该联网 —— 两个条件（任一成立）：
+        //   ① 一条资料都没检索到（refuse）
+        //   ② 有资料但**一个锚点都没有**（weak + 无锚点）
+        // 只靠 ① 太窄：实测「原神5.8到7.1经历了哪些版本」会撞到角色词，
+        // level 是 weak 而不是 refuse，于是永远不联网 —— 但它明显是库外问题。
+        // grounding.mjs 的实测结论是「库外问题 10/10 无锚点」，无锚点是可靠判据。
+        const outOfCorpus = preGate.refuse
+          || (preGate.level === 'weak' && (pre.anchors || []).length === 0);
+        if (outOfCorpus) {
+          webSources = await searchWeb(message, webSearchCfg, message);
+          if (webSources.length) {
+            chatInput.webContext = renderWebContext(webSources);
+          }
+        }
+      } catch { /* 预检失败就当没有联网 —— 不能因为它让整轮对话失败 */ }
+    }
+
     const it = runChat(v1.db, CHAT_DIR, chatInput);
     try {
       for await (const ev of it) {
@@ -453,6 +516,16 @@ async function routeV1(req, res, url, seg) {
           // coverage 一并交给闸门：识别到了库里的条目、只是没取到资料时，不许硬拒答
           // （「问题点名了库里的条目」本身就说明这不是库外问题）。
           gate = assessRetrieval({ sources: kept, anchors, coverage });
+          // 库内为空但联网搜到了东西 → 不拒答，改走网络结果生成。
+          // level 用 'web' 而不是 'ok'，让客户端能明确区分「可回溯」与「来自网络」。
+          if (gate.refuse && webSources.length) {
+            gate = {
+              level: 'web',
+              refuse: false,
+              reason: `知识库无相关结果，已改查网络（${webSources.length} 条，未经观测枢核对）`,
+              webSources: webSources.map((w) => ({ ref: w.ref, title: w.title, url: w.url })),
+            };
+          }
           send({ type: 'grounding', level: gate.level, reason: gate.reason, refused: gate.refuse, anchors });
           if (gate.refuse) {
             answer = gate.answer;

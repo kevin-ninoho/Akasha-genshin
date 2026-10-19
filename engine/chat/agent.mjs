@@ -66,6 +66,10 @@ export async function* runChat(db, dir, input) {
   }
 
   const session = sessionOf(input.sessionId);
+  // 只传 obcDb。以前这里传的是 (db, input.storyDb, input.obcDb)，
+  // 但 retrieve.mjs 的 createRetriever 早就从 (db, storyDb, obcDb) 收敛成了
+  // (db, obcDb)——《日月全事》移除后 storyDb 不再需要。多传一个参数的结果是
+  // obcDb 收到 null，观测枢那条通路整个失效（表现：书籍类引用点不出官方链接）。
   const retriever = getRetriever(db, input.obcDb);
   const budget = Number.isFinite(input.budget) ? input.budget : DEFAULT_BUDGET;
 
@@ -84,6 +88,13 @@ export async function* runChat(db, dir, input) {
   }
 
   const ctx = assembleContext(result.sources, budget);
+
+  // 联网兜底结果（由 serve-client 在「库内检索为空」时预先搜好传进来）。
+  // 拼在知识库上下文**后面**，并且带着明确的「这是网络内容」提示，
+  // 让模型知道哪些可回溯、哪些不可回溯。没传就完全不影响原行为。
+  if (input.webContext) {
+    ctx.text = String(ctx.text || '') + '\n\n' + String(input.webContext);
+  }
 
   if (result.entities.length) session.lastEntities = result.entities;
 
@@ -133,10 +144,7 @@ export async function* runChat(db, dir, input) {
   // 检索模式的分块吐字，保持前端体验一致
   function* streamExtractive() {
     finalProvider = 'extractive';
-    answer = extractiveAnswer(question, ctx.kept, {
-      entities: result.entities,
-      coverage: result.coverage,
-    });
+    answer = extractiveAnswer(question, ctx.kept, { entities: result.entities, coverage: result.coverage });
     const step = 120;
     for (let i = 0; i < answer.length; i += step) {
       if (input.signal && input.signal.aborted) break;
@@ -252,7 +260,9 @@ export async function* runChat(db, dir, input) {
 }
 
 // retriever 需要 db 才能建索引，按进程缓存一份。
-// obcDb 是侧车库只读连接（观测枢官方图鉴）；没有时传 null，检索会自动跳过。
+// obcDb 是侧车库连接（观测枢官方图鉴），没有时传 null，观测枢那一路会自动跳过。
+// 缓存键必须带上它，否则先建的那份（obcDb 为 null）会把后来的连接吃掉 ——
+// 这一点在本文件里踩过：参数从 3 个收敛到 2 个时调用方没跟着改，obcDb 一直是 null。
 let cached = null;
 let cachedKey = '';
 function getRetriever(db, obcDb = null) {

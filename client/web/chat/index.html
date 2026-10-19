@@ -7,6 +7,9 @@
   <title>Akasha · 二游垂直 AI 工作台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%238aa4ff'/%3E%3Cpath d='M9 12h14M9 16h10M9 20h6' stroke='%230f1115' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
+  <!-- theme.js 要**同步**执行（不加 defer），并且放在 body 之前：
+       主题必须在首帧前定下来，否则会先闪一下深色/浅色。 -->
+  <script src="/theme.js"></script>
 </head>
 <body>
   <div class="app">
@@ -40,6 +43,8 @@
              客户端不得以任何形式直接访问知识库全部内容，界面上就不该出现这种按钮。
              自己要翻库用浏览器开 http://127.0.0.1:5178。 -->
         <button class="icon" id="reset" title="清空本会话的服务端上下文">↺</button>
+        <!-- 明暗切换。默认跟系统走，点了就记住选择。 -->
+        <button class="icon" id="theme" title="切换深色 / 浅色" aria-label="切换主题" aria-pressed="false">🌙</button>
       </header>
 
       <div class="log" id="log" role="log" aria-live="polite"></div>

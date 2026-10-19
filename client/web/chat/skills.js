@@ -18,11 +18,37 @@
 
   var CACHE = null;        // 目录只拉一次
   var inflight = null;
+  // 技能图标：每次**客户端启动**换一批角色头像。
+  // seed 在模块加载时生成一次 —— 同一会话内刷新页面不变，重开客户端才换。
+  var ICON_SEED = Math.floor(Math.random() * 1e9);
+  var ICONS = null;        // skillId → 头像 URL
+  var iconsInflight = null;
 
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function loadIcons() {
+    if (ICONS) return Promise.resolve(ICONS);
+    if (iconsInflight) return iconsInflight;
+    iconsInflight = fetch('/v1/skill-icons?seed=' + ICON_SEED)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        ICONS = (j && j.icons) || {};
+        iconsInflight = null;
+        return ICONS;
+      })
+      .catch(function () { iconsInflight = null; ICONS = {}; return ICONS; });
+    return iconsInflight;
+  }
+
+  /** 技能图标：有头像就画头像，没有就退回 emoji。 */
+  function iconHtml(skillId, emoji, cls) {
+    var url = ICONS && ICONS[skillId];
+    if (!url) return '<span class="' + (cls || 'sk-emoji') + '">' + esc(emoji || '✦') + '</span>';
+    return '<img class="' + (cls || 'sk-av') + '" src="' + esc(url) + '" alt="" loading="lazy" draggable="false">';
   }
 
   var STATUS = {
@@ -34,17 +60,19 @@
   function load() {
     if (CACHE) return Promise.resolve(CACHE);
     if (inflight) return inflight;
-    inflight = fetch('/v1/skills')
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) {
-        CACHE = j;
-        inflight = null;
-        // 侧栏导航上挂个数量，让人知道这里有多少东西
-        var badge = document.getElementById('nav-skill-count');
-        if (badge && j && j.counts) badge.textContent = String(j.counts.ready + j.counts.beta);
-        return j;
-      })
-      .catch(function () { inflight = null; return null; });
+    // 图标和目录一起就绪再返回 —— 否则首次渲染会先画 emoji 再跳成头像，闪一下
+    inflight = Promise.all([
+      fetch('/v1/skills').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      loadIcons(),
+    ]).then(function (both) {
+      var j = both[0];
+      CACHE = j;
+      inflight = null;
+      // 侧栏导航上挂个数量，让人知道这里有多少东西
+      var badge = document.getElementById('nav-skill-count');
+      if (badge && j && j.counts) badge.textContent = String(j.counts.ready + j.counts.beta);
+      return j;
+    }).catch(function () { inflight = null; return null; });
     return inflight;
   }
 
@@ -137,7 +165,7 @@
                   return '<button class="sk-card ' + st.cls + (clickable ? '' : ' sk-off') + '"' +
                     (clickable ? ' data-skill="' + esc(s.id) + '"' : ' disabled') + '>' +
                     '<div class="sk-card-h">' +
-                      '<span class="sk-ico2">' + esc(s.icon) + '</span>' +
+                      iconHtml(s.id, s.icon, 'sk-av') +
                       '<span class="sk-lb">' + esc(s.label) + '</span>' +
                       '<span class="sk-badge ' + st.cls + '">' + st.mark + ' ' + st.label + '</span>' +
                     '</div>' +

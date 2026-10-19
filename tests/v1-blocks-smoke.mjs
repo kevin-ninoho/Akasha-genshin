@@ -385,6 +385,10 @@ const child = spawn(process.execPath, [path.join(KB, 'serve-client.mjs')], {
     ...process.env,
     KB_CLIENT_PORT: String(PORT), KB_CLIENT_HOST: '127.0.0.1',
     KB_CLIENT_TOKEN: TOKEN, KB_CLIENT_RATE: '5000', KB_CLIENT_AUTH: '',
+    // 关掉联网兜底：下面 F 段要断言「库外问题 → 硬拒答」。
+    // 开了联网之后那条路会变成 level=web（带着网络结果生成），断言就不再成立。
+    // 测试必须确定性 —— 不能依赖网络通不通、也不能每次真花钱搜一次。
+    KB_WEBSEARCH: '0',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
