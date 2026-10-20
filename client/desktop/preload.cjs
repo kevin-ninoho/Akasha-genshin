@@ -7,3 +7,5 @@ contextBridge.exposeInMainWorld('boot', {
   onData: (cb) => ipcRenderer.on('boot:data', (_e, d) => { try { cb(d); } catch { /* ignore */ } }),
   skip: () => ipcRenderer.send('boot:skip'),
 });
+
+contextBridge.exposeInMainWorld('akashaLocal',{importVideos:()=>ipcRenderer.invoke('local:import-videos')});

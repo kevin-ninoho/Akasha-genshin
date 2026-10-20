@@ -1,3 +1,6 @@
+import './lib/local-policy.mjs';
+import { WorkspaceStore } from './lib/workspace-store.mjs';
+import { GameRegistry } from './lib/games.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,8 +10,8 @@ import { openV1, V1_DOMAINS } from './lib/v1-data.mjs';
 import { assessRetrieval, auditAnswer } from './lib/grounding.mjs';
 import { buildBlocks, summarizeBlocks, blockHintForPrompt, BLOCK_KINDS } from './lib/blocks.mjs';
 import { createRetriever, assembleContext, DEFAULT_BUDGET } from './chat/retrieve.mjs';
-import { runChat } from './chat/agent.mjs';
-import { MediaJobs } from './lib/media-jobs.mjs';
+import { runChat, resetSession } from './chat/agent.mjs';
+import { MediaJobs, videoCatalog } from './lib/media-jobs.mjs';
 import { loadVideoIndex } from './lib/video-index.mjs';
 import { corpusRevision } from './lib/corpus-revision.mjs';
 import { loadConfig, resolveProvider, resolveThinking } from './chat/llm.mjs';
@@ -19,6 +22,9 @@ import { skillCatalog, assignIcons, SKILLS } from './lib/skills/index.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.KB_DATA_DIR || path.join(HERE, 'data');
+const games = new GameRegistry();
+const workspace = new WorkspaceStore(process.env.AKASHA_WORKSPACE_DB || path.join(process.env.AKASHA_ROOT || path.dirname(HERE), 'userData', 'workbench.sqlite'));
+const corpusVersion = () => String(corpusRevision(DATA)) + ':' + (() => { try { return fs.statSync(path.join(DATA, 'kb.sqlite')).mtimeMs; } catch { return 0; } })();
 const CHAT_DIR = path.join(HERE, 'chat');
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.KB_CLIENT_PORT || 5180);
@@ -48,7 +54,7 @@ function sendJson(res, payload, status = 200, extra = {}) {
 }
 function sendErr(res, err) {
   const status = err && err.status ? err.status : 500;
-  sendJson(res, { error: { code: (err && err.code) || 'internal', message: err instanceof ApiError ? err.message : '服务异常，请稍后重试或检查服务配置。', status } }, status);
+  sendJson(res, { error: { code: (err && err.code) || 'internal', message: err?.status && err?.code ? err.message : '服务异常，请稍后重试或检查服务配置。', status } }, status);
 }
 function readBody(req, limit = 256 * 1024) {
   return new Promise((resolve, reject) => {
@@ -94,9 +100,13 @@ function rateLimit(hash, maximum = RATE_PER_MIN) {
 
 let v1 = null;
 let corpusProblem = '';
-try { v1 = openV1(DATA, { writable: true }); }
+try { v1 = openV1(DATA, { writable: false }); }
 catch { corpusProblem = '未配置资料库。请设置 KB_DATA_DIR 指向自行准备的资料目录。'; }
 const videoIndex = loadVideoIndex(process.env.KB_VIDEO_INDEX_PATH || '');
+const libraryFile=path.join(path.dirname(process.env.AKASHA_WORKSPACE_DB || path.join(process.env.AKASHA_ROOT || path.dirname(HERE),'userData','workbench.sqlite')),'local-videos.json');
+const library=loadVideoIndex(libraryFile);
+for(const [k,v] of library.entries)videoIndex.entries.set(k,v);
+if(library.configured)videoIndex.configured=true;
 function requireCorpus() {
   if (!v1) throw new ApiError(503, 'corpus_not_configured', corpusProblem || '未配置资料库。');
   return v1;
@@ -187,7 +197,7 @@ const media = new MediaJobs({root:process.env.KB_MEDIA_CACHE || path.join(DATA,'
   return videoIndex.entries.get(`${id}:${index}`) || null;
 }});
 let statusCache = null;
-const HANDLED = new Set(['meta', 'query', 'record', 'asset', 'retrieve', 'chat', 'health', 'usage', 'domains', 'demo', 'videos', 'media', 'status', 'plan', 'skills', 'skill-icons']);
+const HANDLED = new Set(['games', 'workspace', 'evidence', 'meta', 'query', 'record', 'asset', 'retrieve', 'chat', 'health', 'usage', 'domains', 'demo', 'videos', 'media', 'status', 'plan', 'skills', 'skill-icons']);
 
 async function routeV1(req, res, url, seg) {
   const head = seg[1] || '';
@@ -220,8 +230,36 @@ async function routeV1(req, res, url, seg) {
   }
 
   const auth = authenticate(req);
-  if (head === 'media' && seg[2] === 'jobs') rateLimit(auth.hash + ':media-poll', 120);
-  else if (!(head === 'media' && seg[2] === 'assets')) rateLimit(auth.hash);
+  const gameId = url.searchParams.get('gameId') || 'genshin';
+  const game = games.get(gameId);
+  const owner = games.scope(auth.hash, gameId, 'media');
+  if (head === 'games') return sendJson(res, { games: games.list(), localOnly: true });
+  if (head === 'workspace') {
+    const kind = seg[2], id = seg[3];
+    if (req.method === 'GET') return sendJson(res, id ? workspace.get(auth.hash,gameId,kind,id) : {items:workspace.list(auth.hash,gameId,kind)});
+    if (req.method === 'POST') {
+      const body = await readBody(req, 13 * 1024 ** 2);
+      if (body.delete) { workspace.delete(auth.hash,gameId,kind,id,body.revision); return sendJson(res,{ok:true}); }
+      return sendJson(res, workspace.put(auth.hash,gameId,kind,id,body.data,body.revision));
+    }
+    throw new ApiError(405,'method_not_allowed','工作区仅支持 GET / POST');
+  }
+  if (head === 'evidence') {
+    if(req.method !== 'GET')throw new ApiError(405,'method_not_allowed','请用 GET');
+    return sendJson(res, workspace.evidence(auth.hash,gameId,seg[2],corpusVersion()));
+  }
+  if (head === 'chat' && seg[2] === 'reset') {
+    if(req.method!=='POST')throw new ApiError(405,'method_not_allowed','请用 POST');
+    const body=await readBody(req);resetSession(games.scope(auth.hash,gameId,body.sessionId));return sendJson(res,{ok:true});
+  }
+  // 图片和媒体资源走独立的高配额桶，不跟对话抢额度（见 kb-viz 同名注释）。
+  if (head === 'asset' || (head === 'media' && seg[2] === 'assets')) {
+    rateLimit(auth.hash + ':asset', 3000);
+  } else if (head === 'media' && seg[2] === 'jobs') {
+    rateLimit(auth.hash + ':media-poll', 240);
+  } else {
+    rateLimit(auth.hash);
+  }
   if(head==='status'){
     if(!statusCache || Date.now()-statusCache.at>30000){
       const cfg=loadConfig(CHAT_DIR),p=await resolveProvider(cfg),ready=p.provider==='openai'&&!p.unreachable;
@@ -231,7 +269,8 @@ async function routeV1(req, res, url, seg) {
           ok: !!v1,
           ready: !!v1 && ready,
           provider: ready ? 'model' : 'extractive',
-          reason: v1 ? (ready ? '生成服务已连接' : '当前为检索模式') : corpusProblem,
+          reason: v1 ? (ready ? '本机模型已连接' : cfg.localBlocked ? '已阻止外部模型；本地检索可用' : '本机模型未连接；本地检索可用') : corpusProblem,
+          localOnly: true, corpusRevision: corpusVersion(), gameId,
           thinking: resolveThinking(cfg),
           deepThinkDefault: resolveThinking(cfg)?.type === 'enabled',
           capabilities: { corpus: !!v1, videoIndex: videoIndex.configured },
@@ -242,20 +281,43 @@ async function routeV1(req, res, url, seg) {
   }
 
   if(head==='videos'){
-    if (!videoIndex.configured) throw new ApiError(503, 'video_index_not_configured', '未配置视频索引。请设置 KB_VIDEO_INDEX_PATH。');
+    // 观测枢视频只索引条目元数据和视频序号；视频 URL/本体不会返回给客户端，
+    // 也不会由这个接口获取。剪辑能力仍由独立的本机素材库提供。
+    if(seg[2]==='catalog' && req.method==='GET'){
+      const q=String(url.searchParams.get('q')||'').slice(0,120).trim();
+      let rows=[];
+      try {
+        rows=v1?.obc?.prepare("SELECT id,name,raw_json,kind FROM obc_entries WHERE kind IN ('char-video','other-video','cutscene') AND name LIKE ? ORDER BY name LIMIT 200").all(`%${q}%`) || [];
+      } catch {}
+      return sendJson(res,{items:videoCatalog(rows),bodyAvailableLocally:false,source:'米游社观测枢'});
+    }
+    if(seg[2]==='import' && req.method==='POST'){
+      const body=await readBody(req);const file=String(body.path||'');
+      let stat;try{stat=fs.statSync(file)}catch{throw new ApiError(400,'invalid_local_video','请选择本机视频文件')}
+      if(!path.isAbsolute(file)||file.startsWith('\\\\')||! /\.(mp4|mov|mkv|webm)$/i.test(file)||!stat.isFile()||stat.size>512*1024*1024)throw new ApiError(400,'invalid_local_video','请选择不超过 512 MB 的本机视频文件');
+      let id=1000000000;while(videoIndex.entries.has(id+':0'))id++;
+      const item={title:path.basename(file),localPath:fs.realpathSync(file),url:''};library.entries.set(id+':0',item);videoIndex.entries.set(id+':0',item);
+      fs.mkdirSync(path.dirname(libraryFile),{recursive:true});
+      const tmp=libraryFile+'.tmp';fs.writeFileSync(tmp,JSON.stringify({entries:[...library.entries].map(([k,v])=>({...v,entryId:Number(k.split(':')[0]),videoIndex:Number(k.split(':')[1])}))}));fs.renameSync(tmp,libraryFile);
+      videoIndex.configured=true;return sendJson(res,{entryId:id,videoIndex:0,title:item.title});
+    }
+    if (!videoIndex.configured) throw new ApiError(503, 'video_index_not_configured', '未配置本地视频索引。可先使用观测枢元数据目录，或添加本机视频素材。');
+    if(!seg[2] && req.method==='GET') return sendJson(res,{items:[...videoIndex.entries.entries()].filter(([,s])=>s.localPath).map(([key,s])=>({entryId:Number(key.split(':')[0]),videoIndex:Number(key.split(':')[1]),title:s.title})).filter(s=>s.title.includes(url.searchParams.get('q')||'')).slice(0,100)});
     const id=Number(seg[2]),index=Number(url.searchParams.get('index')||0);
     try{
       if(!seg[3]&&req.method==='GET')return sendJson(res,media.metadata(id,index));
-      if(seg[3]==='scenes'&&req.method==='POST')return sendJson(res,media.scenes(id,index,auth.hash),202);
-      if(seg[3]==='clips'&&req.method==='POST'){const body=await readBody(req);return sendJson(res,media.clip(id,index,body.start,body.end,auth.hash),202);}
+      if(seg[3]==='scenes'&&req.method==='POST')return sendJson(res,media.scenes(id,index,owner),202);
+      if(seg[3]==='clips'&&req.method==='POST'){const body=await readBody(req);return sendJson(res,media.clip(id,index,body.start,body.end,owner),202);}
       throw new ApiError(405,'method_not_allowed','视频接口方法无效');
     }catch(e){if(e instanceof ApiError)throw e;throw new ApiError(400,'invalid_video_request',e.message)}
   }
   if(head==='media'){
+    if(seg[2]==='jobs'&&seg[4]==='cancel'&&req.method==='POST')return sendJson(res,media.cancel(seg[3],owner));
+    if(seg[2]==='jobs'&&!seg[3]&&req.method==='GET')return sendJson(res,{items:media.list(owner)});
     if(req.method!=='GET'&&req.method!=='HEAD')throw new ApiError(405,'method_not_allowed','请用 GET');
-    if(seg[2]==='jobs'){const job=media.get(seg[3],auth.hash);if(!job)throw new ApiError(404,'job_not_found','没有该任务');return sendJson(res,job);}
+    if(seg[2]==='jobs'){const job=media.get(seg[3],owner);if(!job)throw new ApiError(404,'job_not_found','没有该任务');return sendJson(res,job);}
     if(seg[2]==='assets'){
-      const asset=media.asset(seg[3],seg[4],seg[5],auth.hash);if(!asset)throw new ApiError(404,'asset_not_found','片段或缩略图不存在，请重新生成。');
+      const asset=media.asset(seg[3],seg[4],seg[5],owner);if(!asset)throw new ApiError(404,'asset_not_found','片段或缩略图不存在，请重新生成。');
       const stat=fs.statSync(asset.file);let start=0,end=stat.size-1,status=200;const headers={'Content-Type':asset.type,'Accept-Ranges':'bytes','Cache-Control':'private, max-age=3600'};
       if(req.headers.range){const m=String(req.headers.range).match(/^bytes=(\d+)-(\d*)$/);if(!m)throw new ApiError(416,'invalid_range','范围无效');start=Number(m[1]);end=m[2]?Math.min(Number(m[2]),end):end;if(start>end)throw new ApiError(416,'invalid_range','范围无效');status=206;headers['Content-Range']=`bytes ${start}-${end}/${stat.size}`;}
       headers['Content-Length']=end-start+1;res.writeHead(status,headers);if(req.method==='HEAD')return res.end();const stream=fs.createReadStream(asset.file,{start,end});stream.on('error',()=>res.destroy());return stream.pipe(res);
@@ -410,7 +472,7 @@ async function routeV1(req, res, url, seg) {
     const body = await readBody(req);
     const message = String(body.message || '').trim();
     if (!message) throw new ApiError(400, 'empty_message', 'message 不能为空');
-    const sessionId = String(body.sessionId || auth.hash).slice(0, 64);
+    const sessionId = games.scope(auth.hash,gameId,body.sessionId || 'default');
     const think = typeof body.think === 'boolean' ? body.think : undefined;
     // 玩家自己的角色清单（存在客户端 localStorage，随请求带来）。
     // 规划要「按这个号算」，但服务端拿不到用户身份（所有客户端共用一个 token），
@@ -436,7 +498,7 @@ async function routeV1(req, res, url, seg) {
     const send = (o) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(o)}\n\n`); };
 
     const ac = new AbortController();
-    req.on('close', () => ac.abort());
+    res.on('close', () => { if(!res.writableEnded) ac.abort(); });
 
     // 锚点先算好：它决定闸门是「硬拒答」还是「依据较弱」
     const anchors = v1.findAnchors(message);
@@ -460,50 +522,8 @@ async function routeV1(req, res, url, seg) {
       obcDb: v1.obc,
     };
 
-    // ---- 联网兜底预检：库内真的空，就先搜网，把结果作为额外上下文带进去
-    //
-    // 为什么放在生成前、而不是在闸门里现场搜：
-    //   闸门在 `for await (const ev of it)` 内部，那里要重启生成器很别扭。
-    //   这里先独立跑一次检索判断，能提前把 webContext 交给 runChat，
-    //   闸门那边只需「有 webContext 就不拒答」。代价是检索跑两次（约 200ms）。
-    //
-    // 只在「库内答不出」时才联网 —— 官方数据优先，这条不能破。
-    let webSources = [];
-    // 联网兜底配置（默认关闭）。从 llm.config.json 的 webSearch 段读，环境变量可覆盖。
-    let webSearchCfg = { enabled: false };
-    try {
-      const llmCfg = loadConfig(CHAT_DIR);
-      const wsCfg = (llmCfg && llmCfg.webSearch) || {};
-      // key 继承：webSearch 没单独配 key 就用模型那把。
-      // DeepSeek 的 Search API 和 chat 是**同一个 key、同一个域名**，不该让用户填两遍。
-      webSearchCfg = resolveWebSearchConfig({ ...wsCfg, apiKey: wsCfg.apiKey || (llmCfg && llmCfg.apiKey) || '' });
-    } catch { /* 读不到就当关闭 */ }
-    if (webSearchCfg.enabled) {
-      try {
-        const pre = doRetrieve(message, {});
-        // ⚠ doRetrieve 返回的是 `kept`（保留下来的资料），**没有** sources 字段。
-        // 写成 pre.sources 会永远是 undefined → 闸门永远判定「库内为空」
-        // → 每句话都去联网。这里必须用 kept。
-        const preGate = assessRetrieval({
-          sources: pre.kept || [], anchors: pre.anchors || [], coverage: pre.coverage,
-        });
-        // 什么时候该联网 —— 两个条件（任一成立）：
-        //   ① 一条资料都没检索到（refuse）
-        //   ② 有资料但**一个锚点都没有**（weak + 无锚点）
-        // 只靠 ① 太窄：实测「原神5.8到7.1经历了哪些版本」会撞到角色词，
-        // level 是 weak 而不是 refuse，于是永远不联网 —— 但它明显是库外问题。
-        // grounding.mjs 的实测结论是「库外问题 10/10 无锚点」，无锚点是可靠判据。
-        const outOfCorpus = preGate.refuse
-          || (preGate.level === 'weak' && (pre.anchors || []).length === 0);
-        if (outOfCorpus) {
-          webSources = await searchWeb(message, webSearchCfg, message);
-          if (webSources.length) {
-            chatInput.webContext = renderWebContext(webSources);
-          }
-        }
-      } catch { /* 预检失败就当没有联网 —— 不能因为它让整轮对话失败 */ }
-    }
-
+    const webSources = []; // Local-only build never performs web fallback.
+    send({type:'progress',phase:'retrieving',label:'正在检索本机资料'});
     const it = runChat(v1.db, CHAT_DIR, chatInput);
     try {
       for await (const ev of it) {
@@ -512,6 +532,9 @@ async function routeV1(req, res, url, seg) {
         // ---- 生成之前的闸门：一条都没检索到 -> 直接拒答，**模型根本不被调用**
         if (ev.type === 'sources') {
           kept = ev.sources || [];
+          const answerId = workspace.capture(auth.hash,gameId,kept,corpusVersion());
+          send({type:'evidence',answerId,revision:corpusVersion()});
+          send({type:'progress',phase:'evidence',label:'正在整理依据'});
           send(ev);
           // coverage 一并交给闸门：识别到了库里的条目、只是没取到资料时，不许硬拒答
           // （「问题点名了库里的条目」本身就说明这不是库外问题）。
@@ -557,7 +580,10 @@ async function routeV1(req, res, url, seg) {
           elapsedMs = ev.elapsedMs || 0;
           continue;
         }
-        if (ev.type === 'provider') provider = ev.provider || '';
+        // 深度思考增量：**照常转发给客户端**（前端折叠展示）。
+        // 早先这里写成 `continue` 直接丢弃，导致界面那个 🧠 开关点了没反应 ——
+        // 模型确实在思考（llm.mjs 会 yield thinking），只是被这一行吞了。
+        if (ev.type === 'provider') { provider = ev.provider || ''; send({type:'progress',phase:'generating',label:provider==='extractive'?'正在整理资料摘录':'模型正在生成回答'}); }
         send(ev);
       }
     } catch (err) {

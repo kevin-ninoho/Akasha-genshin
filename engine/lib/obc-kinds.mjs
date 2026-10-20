@@ -40,7 +40,11 @@ export const OBC_KIND_DEFS = [
   { kind: 'weapon', label: '武器', menuIds: [5], coverage: 'only', icon: true, pick: /武器/ },
   { kind: 'artifact', label: '圣遗物', menuIds: [218], coverage: 'only', icon: true, pick: /圣遗物/ },
   { kind: 'book', label: '书籍', menuIds: [68], coverage: 'overlap', pick: /书籍|书/ },
-  { kind: 'item', label: '材料道具', menuIds: [13], coverage: 'only' },
+  // 材料道具要 icon —— 角色突破材料表（ascension 块）每一条都带材料图标，
+  // 用户就是靠图标一眼认出「霓裳花 / 骗骗花」的。没有 icon 就是一片灰块。
+  // ⚠ 加这条之前先确认库里的 icon 列已回填（tools/backfill-obc-icons.mjs），
+  //   否则 fetch-obc-icons.mjs 的 `icon IS NOT NULL` 会一条都查不到。
+  { kind: 'item', label: '材料道具', menuIds: [13], coverage: 'only', icon: true },
   { kind: 'enemy', label: '敌人', menuIds: [6], coverage: 'only', icon: true, pick: /敌人|怪物|boss|首领/i },
   { kind: 'food', label: '食物', menuIds: [21], coverage: 'only' },
   { kind: 'quest', label: '任务', menuIds: [43], coverage: 'overlap', pick: /任务/ },

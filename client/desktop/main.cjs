@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 const net = require('node:net');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const IS_PACKAGED = app.isPackaged;
 const PROJECT_ROOT = process.env.AKASHA_ROOT || (IS_PACKAGED ? app.getPath('userData') : path.resolve(__dirname, '..', '..'));
 const userData = process.env.AKASHA_TEST_USER_DATA || process.env.AKASHA_USER_DATA || path.join(PROJECT_ROOT, 'userData');
@@ -55,7 +56,7 @@ function isWritable(dir) {
  * 换台电脑之所以"什么都用不了"，就是因为以前包里根本没有知识库。
  */
 function resolveKbDir() {
-  const candidate = config.kbDir || (IS_PACKAGED ? path.join(RESOURCES, 'engine') : path.join(PROJECT_ROOT, 'engine'));
+  const candidate = IS_PACKAGED ? path.join(RESOURCES, 'engine') : path.resolve(DESKTOP,'..','..','engine');
   if (fs.existsSync(path.join(candidate, 'serve-client.mjs'))) { kbSource = config.kbDir ? '用户配置' : '默认引擎'; return candidate; }
   kbProblem = '未找到知识库引擎，请重新安装或配置 kbDir。';
   return '';
@@ -85,7 +86,7 @@ function resolvePaths() {
   // resolveKbDir() 会照常写一条 kbProblem（它只关心本机），
   // 不清掉的话界面会挂着「安装包内没有知识库，且没有配置外部知识库目录」——
   // 用户会以为软件坏了。
-  if (String(process.env.AKASHA_TEST_V1 || config.kbRemoteV1 || '').trim()) kbProblem = '';
+  if (String(process.env.AKASHA_TEST_V1 || config.kbRemoteV1 || BUILD_DEFAULTS.kbRemoteV1 || '').trim()) kbProblem = '';
 
   // 把「这次到底连哪儿、用没用 token」落一份盘。
   // 排查「客户端连不上服务端」时，第一件事就是看这个文件 ——
@@ -110,7 +111,7 @@ function resolvePaths() {
   } catch { /* 写不了就算了，不影响启动 */ }
 }
 
-const PORTS = { v1: Number(process.env.AKASHA_V1_PORT || 5180), chat: Number(process.env.AKASHA_TEST_CHAT_PORT || 5190) };
+const PORTS = { v1: Number(process.env.AKASHA_V1_PORT || 15280), chat: Number(process.env.AKASHA_TEST_CHAT_PORT || 5190) };
 
 /**
  * 界面上那几个页签指向哪。
@@ -144,6 +145,13 @@ function views() {
  *
  * 商业发行走客户端模式（知识库不落地到用户机器上）；
  * 你自己演示/内测用本地模式。
+ *
+ * ⚠ **一份 main.cjs 同时支持两种模式**，判断依据是 `BUILD_DEFAULTS`：
+ *   · 仓库里的源码版：`BUILD_DEFAULTS = Object.freeze({})`（空）→ 本地模式
+ *   · 官方分发包：构建脚本把 BUILD_DEFAULTS 换成读 build-defaults.client.json
+ *     （含 kbRemoteV1 + kbToken）→ 客户端模式
+ * 所以这里**不能**写死 return ''：那样官方包虽然内嵌了地址和令牌，
+ * main.cjs 却不读，用户装了连不上任何东西（踩过）。
  */
 function remoteV1() {
   const u = String(process.env.AKASHA_TEST_V1 || config.kbRemoteV1 || BUILD_DEFAULTS.kbRemoteV1 || '').trim();
@@ -153,7 +161,7 @@ function remoteV1() {
 /** 备选 /v1 地址（配置里可以是数组，也可以写单个字符串）。 */
 function remoteV1Fallbacks() {
   if (process.env.AKASHA_TEST_V1) return [];
-  const v = config.kbRemoteV1Fallbacks || [];
+  const v = config.kbRemoteV1Fallbacks || BUILD_DEFAULTS.kbRemoteV1Fallbacks || [];
   return (Array.isArray(v) ? v : [v])
     .map((s) => String(s || '').trim().replace(/\/+$/, ''))
     .filter(Boolean);
@@ -206,7 +214,8 @@ function services() {
       script: path.join(config.kbDir, 'serve-client.mjs'), args: [], cwd: config.kbDir,
       env: {
         KB_CLIENT_PORT: String(PORTS.v1), KB_CLIENT_HOST: '127.0.0.1',
-        KB_DATA_DIR: config.dataDir || path.join(PROJECT_ROOT, 'data'),
+        AKASHA_ROOT: PROJECT_ROOT, AKASHA_WORKSPACE_DB: process.env.AKASHA_WORKSPACE_DB || path.join(app.getPath('userData'),'workbench.sqlite'),
+        KB_DATA_DIR: process.env.KB_DATA_DIR || config.dataDir || path.join(PROJECT_ROOT, 'data'),
         KB_MEDIA_CACHE: path.join(PROJECT_ROOT, 'cache', 'media'),
         KB_LLM_CONFIG_PATH: path.join(app.getPath('userData'), 'llm.config.json'),
         ...(config.videoIndexPath ? { KB_VIDEO_INDEX_PATH: config.videoIndexPath } : {}),
@@ -237,6 +246,9 @@ function services() {
     //   落点，关掉鉴权等于把公网入口敞开。这里是注入 token，不是取消鉴权。
     env: {
       KB_V1_UPSTREAM: rV1 || `http://127.0.0.1:${PORTS.v1}`,
+      // 客户端模式下 upstream 是远端地址，chat-app 默认会拒绝非回环地址
+      // （那是给本地模式设的闸）。这个开关只在客户端模式注入。
+      ...(rV1 ? { KB_ALLOW_REMOTE_UPSTREAM: '1' } : {}),
       ...(String(process.env.KB_CLIENT_TOKEN || config.kbToken || BUILD_DEFAULTS.kbToken || '')
         ? { KB_CLIENT_TOKEN: String(process.env.KB_CLIENT_TOKEN || config.kbToken || BUILD_DEFAULTS.kbToken || '') }
         : {}),
@@ -311,43 +323,10 @@ function log(msg) {
   process.stdout.write(`[desktop] ${msg}\n`);
 }
 
-const { createUpdates } = require('./updates.cjs');
-let updateState = null;
-async function showUpdateStatus() {
-  if (!updateState) scheduleUpdateCheck();
-  await updateState.check();
-  const status = updateState.state;
-  if (status.phase === 'downloaded') {
-    const result = await dialog.showMessageBox(win, { type: 'info', title: '更新',
-      message: '新版 ' + status.version + ' 已下载', buttons: ['重启并更新', '稍后'], defaultId: 1, cancelId: 1 });
-    if (result.response === 0) updateState.install();
-  } else {
-    const canCopy = status.portable && status.source;
-    const result = await dialog.showMessageBox(win, { type: 'info', title: '更新',
-      message: status.reason, detail: status.phase === 'available' ? '新版 ' + status.version + '\n' + status.source.releases : '',
-      buttons: canCopy ? ['复制发布页地址', '关闭'] : ['关闭'] });
-    if (canCopy && result.response === 0) clipboard.writeText(status.source.releases);
-  }
+async function showUpdateStatus(){
+  await dialog.showMessageBox(win,{type:'info',title:'本机版本',message:'此版本不会连接更新服务器。请使用本地安装包升级。',buttons:['好']});
 }
-function scheduleUpdateCheck() {
-  if (updateState) return;
-  let metadata = {};
-  try { metadata = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')); } catch {}
-  updateState = createUpdates({ packaged: IS_PACKAGED, portable: !!process.env.PORTABLE_EXECUTABLE_FILE,
-    metadata, version: applicationVersion(), loadUpdater: () => require('electron-updater').autoUpdater,
-    changed: (status) => {
-      if (status.phase === 'downloaded') dialog.showMessageBox(win, { type: 'info', title: '更新已下载',
-        message: '新版 ' + status.version + ' 已下载，可通过帮助菜单重启并更新。', buttons: ['好'] });
-      if (status.portable && status.phase === 'available') dialog.showMessageBox(win, { type: 'info', title: '发现新版',
-        message: '新版 ' + status.version + ' 可用。便携版不支持原地更新。',
-        detail: status.source.releases, buttons: ['复制发布页地址', '稍后'], cancelId: 1
-      }).then(({ response }) => { if (response === 0) clipboard.writeText(status.source.releases); });
-    },
-  });
-  if (updateState.state.phase !== 'disabled') setTimeout(() => updateState.check(), 8000);
-}
-
-// ---------------------------------------------------------------- 窗口状态
+function scheduleUpdateCheck(){}
 
 function loadState() {
   try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')) || {}; } catch { return {}; }
@@ -377,6 +356,7 @@ function createWindow() {
     title: 'Akasha',
     autoHideMenuBar: false,
     webPreferences: {
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: false,
@@ -386,6 +366,7 @@ function createWindow() {
 
   if (st.maximized) win.maximize();
   win.once('ready-to-show', () => { if (!process.env.AKASHA_TEST_HIDDEN) win.show(); });
+  win.webContents.on('did-fail-load', (_event, errorCode) => log(`主窗口加载失败（错误码 ${errorCode}）`));
 
   win.on('resize', saveState);
   win.on('move', saveState);
@@ -405,6 +386,22 @@ function createWindow() {
   //   现在：不新开窗、不跳转、不交给系统浏览器。界面只能停在对话前端。
   //   将来确有需要放外链（比如官网），在下面加**显式白名单**，
   //   不要图省事放开整个回环段。
+  win.webContents.session.webRequest.onBeforeRequest((details,callback)=>{
+    let allowed=false;try{const u=new URL(details.url);allowed=['data:','blob:','devtools:'].includes(u.protocol)||u.protocol==='file:'||u.origin==='http://127.0.0.1:'+PORTS.chat;}catch{}
+    callback({cancel:!allowed});
+  });
+  ipcMain.removeHandler('local:import-videos');
+  ipcMain.handle('local:import-videos',async event=>{
+    if(event.sender!==win.webContents || event.senderFrame.url.split('/').slice(0,3).join('/')!=='http://127.0.0.1:'+PORTS.chat)return {error:'来源无效'};
+    const chosen=await dialog.showOpenDialog(win,{properties:['openFile','multiSelections'],filters:[{name:'本地视频',extensions:['mp4','mov','mkv','webm']}]});
+    if(chosen.canceled)return {items:[]};
+    const items=[];
+    for(const file of chosen.filePaths){
+      const r=await fetch('http://127.0.0.1:'+PORTS.v1+'/v1/videos/import',{method:'POST',redirect:'error',headers:{Authorization:'Bearer '+process.env.KB_CLIENT_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({path:file})});
+      if(!r.ok)return {error:'本地素材登记失败，请检查文件和服务状态'};items.push(await r.json());
+    }
+    return {items};
+  });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (ev, url) => {
     // 只允许停在对话前端的同源地址（hash 变化不走这个事件，不受影响）
@@ -472,7 +469,7 @@ function buildMenu() {
       submenu: [
         { label: '打开配置文件夹', click: () => shell.showItemInFolder(configFile) },
         {
-          label: '检查更新 / 重启并更新', click: () => showUpdateStatus(),
+          label: '本机版本与升级说明', click: () => showUpdateStatus(),
         },
         // ⚠ 这里原有两个入口已删除：
         //   「打开知识库仓库」—— 在资源管理器里直接打开知识库目录，
@@ -491,7 +488,7 @@ function buildMenu() {
               '',
               // 运维视角的信息（知识库地址/目录、语音服务）不上「关于」页：
               // 客户不关心后面接着什么，这些路径也不该出现在客户界面上。
-              `更新：${updateState?.state.reason || '初始化中'}`,
+          '更新：本机构建不会联网检查更新',
               IS_PACKAGED ? '（打包版）' : '（开发模式）',
             ].join('\n'),
             buttons: ['好'],
@@ -512,6 +509,23 @@ function loadConfig() {
   } catch { /* 首次运行或文件损坏：用默认值 */ }
   resolvePaths();
   // 首次运行把解析结果落盘，方便用户直接改
+  //
+  // ── token 按模式选 ────────────────────────────────────────────────
+  // 客户端模式下必须用**内嵌的那把**（config.kbToken 或 BUILD_DEFAULTS.kbToken），
+  // 因为远端知识库只认它。早先这里无条件生成一个随机 token 塞进
+  // KB_CLIENT_TOKEN，结果官方包永远带着随机 token 去连远端 → 401。
+  // 本地模式才用随机 token（那台机器自己起 serve-client，两边对得上就行）。
+  if (!process.env.KB_CLIENT_TOKEN) {
+    const builtToken = String(config.kbToken || BUILD_DEFAULTS.kbToken || '');
+    const hasRemote = !!String(process.env.AKASHA_TEST_V1 || config.kbRemoteV1 || BUILD_DEFAULTS.kbRemoteV1 || '').trim();
+    if (hasRemote && builtToken) {
+      process.env.KB_CLIENT_TOKEN = builtToken;
+    } else {
+      const tokenFile = path.join(app.getPath('userData'), 'local-auth.token');
+      if (!fs.existsSync(tokenFile)) fs.writeFileSync(tokenFile, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
+      process.env.KB_CLIENT_TOKEN = fs.readFileSync(tokenFile, 'utf8').trim();
+    }
+  }
   if (!fs.existsSync(configFile)) saveConfig();
 }
 
@@ -574,6 +588,7 @@ async function boot() {
 
   // 有服务没起来也照样进界面：日志里留一份，界面上由状态灯表达
   if (problems.length) log(`部分服务未启动（不影响界面打开）：${problems.join(' | ')}`);
+  log('本机服务就绪，打开工作台');
   goto('chat');
 }
 

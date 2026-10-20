@@ -29,6 +29,14 @@ const argPort = process.argv.indexOf('--port');
 const PORT = argPort >= 0 ? Number(process.argv[argPort + 1]) : Number(process.env.CHAT_PORT || 5190);
 const V1 = process.env.KB_V1_UPSTREAM || 'http://127.0.0.1:5180';
 const V1_URL = new URL(V1);
+// 两种模式共用这一份 chat-app：
+//   · 本地模式：upstream 是本机 serve-client（127.0.0.1）——只允许回环地址
+//   · 客户端模式：upstream 是远端知识库（由 main.cjs 注入内嵌地址）——必须允许
+// 所以这里**不能一刀切拒绝非 loopback**。判断依据是 main.cjs 有没有显式注入
+// KB_ALLOW_REMOTE_UPSTREAM（它只在客户端模式下注入）。
+const ALLOW_REMOTE = process.env.KB_ALLOW_REMOTE_UPSTREAM === '1';
+if (!['http:', 'https:'].includes(V1_URL.protocol) || V1_URL.username || V1_URL.password) throw Error('知识服务地址无效');
+if (!ALLOW_REMOTE && !['127.0.0.1', '[::1]', 'localhost'].includes(V1_URL.hostname)) throw Error('本机模式禁止远端知识服务');
 // 本地默认：从 KB_CLIENT_TOKEN 注入。页面自己带了 Authorization 时以页面的为准
 // （远端模式用得上：那时用户有自己的 token）。
 const V1_TOKEN = process.env.KB_CLIENT_TOKEN || '';
@@ -67,6 +75,7 @@ function proxyV1(req, res) {
     method: req.method,
     headers,
   }, (upRes) => {
+    if(upRes.statusCode>=300&&upRes.statusCode<400){upRes.resume();return sendJson(res,502,{error:{code:'redirect_blocked',message:'本机模式已阻止服务重定向'}});}
     const out = { ...upRes.headers };
     if (String(out['content-type'] || '').includes('text/event-stream')) {
       delete out['content-length'];
@@ -84,6 +93,7 @@ function proxyV1(req, res) {
       message: '无法连接知识库接口，请检查服务配置。',
     });
   });
+  res.on('close',()=>{if(!res.writableEnded)up.destroy();});
   req.pipe(up);
 }
 
@@ -112,6 +122,9 @@ function serveStatic(req, res, pathname) {
 }
 
 const server = http.createServer((req, res) => {
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'");
+  if(req.headers.host!== '127.0.0.1:'+PORT && req.headers.host!== '[::1]:'+PORT) return sendJson(res,403,{error:{message:'本机来源校验失败'}});
+  if(req.headers.origin && req.headers.origin !== 'http://'+req.headers.host) return sendJson(res,403,{error:{message:'跨来源访问已阻止'}});
   let url;
   try {
     url = new URL(req.url, `http://127.0.0.1:${PORT}`);

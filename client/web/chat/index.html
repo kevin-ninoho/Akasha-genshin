@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>Akasha · 二游垂直 AI 工作台</title>
+  <title>Akasha · 本地游戏知识工作台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%238aa4ff'/%3E%3Cpath d='M9 12h14M9 16h10M9 20h6' stroke='%230f1115' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
   <!-- theme.js 要**同步**执行（不加 defer），并且放在 body 之前：
@@ -13,7 +13,7 @@
 </head>
 <body>
   <div class="app">
-    <aside class="side" id="side">
+    <aside class="side" id="side"><div class="brand"><span class="brand-mark">✧</span><div>AKASHA<small>LOCAL OBSERVATORY</small></div></div><div class="game-switch"><span>◈</span> 原神 <small>本机资料</small></div>
       <div class="side-head">
         <button class="new" id="new">
           <span class="ico">＋</span> 新对话
@@ -22,8 +22,13 @@
       <!-- 一级导航。技能与对话平级，不是藏在浮层里的按钮 ——
            用户第一次打开就该看见「这东西能干什么」，而不是一个光秃秃的输入框。 -->
       <nav class="side-nav" id="side-nav" aria-label="主导航">
-        <button class="nav-i on" data-nav="chat"><span class="ni">💬</span>对话</button>
-        <button class="nav-i" data-nav="skills"><span class="ni">✦</span>技能<span class="nc" id="nav-skill-count"></span></button>
+        <button class="nav-i" data-nav="home"><span class="ni">⌂</span>星图首页</button>
+        <button class="nav-i" data-nav="chat"><span class="ni">◇</span>知识问答</button>
+        <button class="nav-i" data-nav="research"><span class="ni">⌘</span>考据研究</button>
+        <button class="nav-i" data-nav="growth"><span class="ni">△</span>养成规划</button>
+        <button class="nav-i" data-nav="pv"><span class="ni">▷</span>PV 创作</button>
+        <button class="nav-i" data-nav="skills"><span class="ni">✦</span>能力目录<span class="nc" id="nav-skill-count"></span></button>
+        <button class="nav-i" data-nav="settings"><span class="ni">⚙</span>偏好设置</button>
       </nav>
       <nav class="convos" id="convos" aria-label="会话列表"></nav>
       <div class="side-foot">
@@ -32,11 +37,11 @@
       </div>
     </aside>
 
-    <main class="main" id="main" data-view="chat">
+    <main class="main" id="main" data-view="chat" tabindex="-1">
       <header class="top">
         <button class="icon only-narrow" id="menu" title="会话列表" aria-label="会话列表">☰</button>
         <h1 id="title">新对话</h1>
-        <span class="spacer"></span>
+        <span class="spacer"></span><button id="save-state" class="save-state" title="保存失败时点击重试">正在连接本机…</button>
         <span class="pill" id="provider" hidden></span>
         <!-- ⚠ 这里原本有一个 🏛 图标：<a id="kb-link" href="/kb/" target="_blank">。
              它是"点开知识库本体"的入口之一 —— 已删除。
@@ -47,6 +52,8 @@
         <button class="icon" id="theme" title="切换深色 / 浅色" aria-label="切换主题" aria-pressed="false">🌙</button>
       </header>
 
+      <div id="wb-notice" role="status"></div>
+      <section id="workbench" class="workbench" hidden></section>
       <div class="log" id="log" role="log" aria-live="polite"></div>
 
       <!-- 技能视图：与对话并列的一屏，不是浮层。
@@ -80,6 +87,8 @@
       </footer>
     </main>
   </div>
+  <aside id="evidence-drawer" class="evidence-drawer" aria-label="回答依据" hidden><header><div><span class="eyebrow">EVIDENCE</span><h2>回答依据</h2></div><button id="close-evidence" class="wb-button" aria-label="关闭依据">✕</button></header><div class="evidence-body"></div></aside>
+  <dialog id="convert-dialog" class="convert-dialog"></dialog>
   <link rel="stylesheet" href="/media.css">
   <link rel="stylesheet" href="/planner.css">
   <link rel="stylesheet" href="/skills.css">
@@ -88,6 +97,9 @@
        window.AkashaSkills / window.AkashaPlanner（与 AkashaMedia 同一个挂法）。 -->
   <script src="/skills.js"></script>
   <script src="/planner.js"></script>
+  <link rel="stylesheet" href="/workbench.css">
+  <script src="/workspace.js"></script><script src="/workbench.js"></script>
+  <script src="/research.js"></script><script src="/growth.js"></script><script src="/pv.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

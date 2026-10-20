@@ -156,40 +156,13 @@
 
   // ------------------------------------------------------------------ 存储
 
-  function loadConvos() {
-    try {
-      var raw = localStorage.getItem(LS_CONVOS);
-      state.convos = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(state.convos)) state.convos = [];
-    } catch (e) { state.convos = []; }
-    try { state.think = localStorage.getItem(LS_THINK) === '1'; } catch (e) { /* ignore */ }
+  async function loadConvos() {
+    state.convos=await window.AkashaStore.loadConversations();
+    state.convos.forEach(c=>(c.messages||[]).forEach(m=>{if(m.streaming){m.streaming=false;m.aborted=true;m.error='上次生成已中断，可重试。';}}));
+    try{state.think=localStorage.getItem(LS_THINK)==='1';}catch{}
   }
-
   function saveConvos() {
-    try {
-      var s = JSON.stringify(state.convos);
-      // 块（语音列表/关系图/表格）比纯文字重得多，而 localStorage 只有 ~5MB。
-      // 超阈值就把**较旧**会话里的块丢掉，宁可它们降级成纯文字，
-      // 也不能让整个历史写不进去（那会连带丢会话标题和全部问答）。
-      if (s.length > 3.5e6) {
-        var slim = state.convos.map(function (c, ci) {
-          if (ci < 3) return c;
-          var cc = {};
-          for (var k in c) cc[k] = c[k];
-          cc.messages = c.messages.map(function (m) {
-            if (!m.blocks || !m.blocks.length) return m;
-            var mm = {};
-            for (var k2 in m) mm[k2] = m[k2];
-            mm.blocks = null;
-            mm.blocksDropped = true;
-            return mm;
-          });
-          return cc;
-        });
-        s = JSON.stringify(slim);
-      }
-      localStorage.setItem(LS_CONVOS, s);
-    } catch (e) { /* 配额满或隐私模式：静默忽略，不影响对话 */ }
+    window.AkashaStore.saveConversations(state.convos).catch(()=>{});
   }
 
   function cur() {
@@ -447,12 +420,16 @@
         '<div class="body">' + esc(m.text) + '</div></div></div>';
     }
 
+    // 深度思考：生成中显示进度条，生成完保留可展开的「思考过程」。
+    // 两者不冲突 —— 进度是「正在做什么」，思考内容是「想了什么」。
     var think = '';
+    if (m.streaming) {
+      think += '<div class="answer-progress">' + esc(m.phase || '正在检索资料') + '</div>';
+    }
     if (m.thinking) {
-      think = '<details class="think"><summary>思考过程 · ' + m.thinking.length + ' 字</summary>' +
+      think += '<details class="think"><summary>思考过程 · ' + m.thinking.length + ' 字</summary>' +
         '<div class="tbody">' + esc(m.thinking) + '</div></details>';
     }
-
     var body = m.text ? rich(m.text)
       : (m.error ? '' : '<span class="cursor"></span>');
 
@@ -498,6 +475,8 @@
     var err = m.error ? '<div class="err">' + esc(m.error) + '</div>' : '';
 
     var acts = '<div class="acts">' +
+      (m.answerId ? '<button data-evidence-id="'+esc(m.answerId)+'">查看依据</button>' : '') +
+      '<button data-collect="'+i+'">加入研究</button><button data-to-plan="'+i+'">转为计划</button>' +
       '<button data-copy="' + i + '">复制</button>' +
       (m.error ? '<button data-retry="' + i + '">重试</button>'
                : (m.streaming ? '' : '<button data-regen="' + i + '">重新生成</button>')) +
@@ -505,7 +484,7 @@
 
     return '<div class="wrap"><div class="msg bot" data-mi="' + i + '">' +
       '<div class="who"><span class="ava">AI</span>Akasha</div>' +
-      think + trustHtml(m) +
+      think + '<div class="answer-basis">'+(m.grounding?.refused ? '尚无足够依据' : m.provider==='extractive' ? '资料摘录 · 直接记载' : '模型归纳 / 推断 · 请核对依据')+'</div>'+ (m.migrationNote?'<p class="note warn">'+esc(m.migrationNote)+'</p>':'') + trustHtml(m) +
       // 块排在文字**前面**：模型在有块时会回「上面就是全部」，
       // 所以必须先有「上面」，否则那句话指不到东西。
       blocksHtml(m) +
@@ -538,7 +517,7 @@
    * 拿不到就静默收掉：这只是装饰，不该因为它失败让空状态报错。
    */
   var archonRowLoaded = false;
-  function loadArchonRow() {
+  function loadArchonRow() { return;
     if (archonRowLoaded) return;
     // 还没渲染到空状态就先不加载，等下次（别把标记置上，否则永远不加载了）
     if (!document.getElementById('archon-row')) return;
@@ -573,6 +552,7 @@
    * 切换靠 data-view 属性 + CSS 控制显隐，不重排 DOM（重排会丢滚动位置和焦点）。
    */
   function setView(view) {
+    if(window.AkashaWorkbench) window.AkashaWorkbench.shell(view);
     var v = view === 'skills' ? 'skills' : 'chat';
     if (els.main) els.main.dataset.view = v;
     if (els.nav) {
@@ -722,7 +702,7 @@
       // 他点了「角色档案」才来问「钟离是谁」，不该再靠正则猜。
       var skillId = state.skill || '';
       clearSkill();   // 只作用于这一次
-      var res = await fetch('/v1/chat', {
+      var res = await fetch('/v1/chat?gameId='+window.AkashaStore.gameId, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
         body: JSON.stringify({ message: text, sessionId: 'web-' + c.id, think: state.think, roster: roster, skill: skillId }),
@@ -743,6 +723,7 @@
       while (!done) {
         var r = await reader.read();
         if (r.done) break;
+        if(!bot.lastSaved || Date.now()-bot.lastSaved>1200){bot.lastSaved=Date.now();saveConvos();}
         buf += dec.decode(r.value, { stream: true });
         var nl;
         while ((nl = buf.indexOf('\n')) >= 0) {
@@ -754,8 +735,10 @@
           var ev;
           try { ev = JSON.parse(payload); } catch (e) { continue; }
           if (ev.type === 'delta') { bot.text += ev.text || ''; schedulePaint(); }
+          else if (ev.type === 'evidence') { bot.answerId=ev.answerId;bot.corpusRevision=ev.revision; }
+          else if(ev.type === 'progress'){bot.phase=ev.label;schedulePaint();}
           else if (ev.type === 'sources') { bot.sources = ev.sources || []; schedulePaint(); }
-          else if (ev.type === 'thinking') { bot.thinking += ev.text || ''; schedulePaint(); }
+          else if (ev.type === 'thinking') { bot.thinking = (bot.thinking || '') + (ev.text || ''); schedulePaint(); }
           // 依据强度（ok / weak / none）与硬拒答标记
           else if (ev.type === 'grounding') { bot.grounding = ev; schedulePaint(); }
           // 结构化答案块：图片 / 语音 / 关系图 / 数据表 / 列表 / 时间轴
@@ -860,11 +843,12 @@
     const pill = els.provider;
 
     if (degraded !== null) {
-      els.dot.className = 'dot bad';
-      els.model.textContent = '检索模式';
+      var localMode = statusCorpusConfigured && statusProvider === 'extractive';
+      els.dot.className = 'dot ' + (localMode ? 'local' : 'bad');
+      els.model.textContent = localMode ? '本机检索' : '检索模式';
       els.model.title = degraded || '生成模型不可用，已降级为原文摘录';
       pill.hidden = false;
-      pill.textContent = '检索模式';
+      pill.textContent = localMode ? '本机模式' : '检索模式';
       pill.title = degraded || '';
       return;
     }
@@ -923,7 +907,7 @@
   if (els.nav) {
     els.nav.addEventListener('click', function (ev) {
       var b = ev.target.closest('[data-nav]');
-      if (b) { setView(b.getAttribute('data-nav')); if (window.innerWidth <= 720) els.side.classList.remove('open'); }
+      if (b && ['chat','skills'].includes(b.getAttribute('data-nav'))) { setView(b.getAttribute('data-nav')); if (window.innerWidth <= 720) els.side.classList.remove('open'); }
     });
   }
 
@@ -933,6 +917,7 @@
       ev.stopPropagation();
       var id = del.getAttribute('data-del');
       state.convos = state.convos.filter(function (c) { return c.id !== id; });
+      window.AkashaStore.removeConversation(id).catch(e=>toast(e.message));
       if (state.curId === id) state.curId = state.convos.length ? state.convos[0].id : null;
       saveConvos(); renderSidebar(); renderLog();
       return;
@@ -959,11 +944,11 @@
   els.reset.addEventListener('click', function () {
     var c = cur();
     if (!c) return;
-    fetch('/kb/api/chat/reset', {
+    fetch('/v1/chat/reset?gameId='+window.AkashaStore.gameId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: 'web-' + c.id }),
-    }).then(function () { toast('已清空该会话的服务端上下文（本地记录保留）'); })
+    }).then(function (r) { if(!r.ok)throw Error('reset failed'); toast('已清空该会话的服务端上下文（本地记录保留）'); })
       .catch(function () { toast('重置失败'); });
   });
 
@@ -1004,6 +989,9 @@
 
   // 起始提示 / 引用跳转 / 复制 / 重生成
   els.log.addEventListener('click', function (ev) {
+    var evidence=ev.target.closest('[data-evidence-id]'),collect=ev.target.closest('[data-collect]'),plan=ev.target.closest('[data-to-plan]');
+    if(evidence){window.AkashaWorkbench.openEvidence(evidence.dataset.evidenceId);return;}
+    if(collect||plan){var mi=Number(collect?collect.dataset.collect:plan.dataset.toPlan);window.AkashaWorkbench.collect(cur().messages[mi],collect?'research':'growth').catch(e=>toast(e.message));return;}
     var st = ev.target.closest('[data-say]');
     if (st) { ask(st.getAttribute('data-say')); return; }
 
@@ -1068,8 +1056,9 @@
 
   // ------------------------------------------------------------------ 启动
 
-  function boot() {
-    loadConvos();
+  async function boot() {
+    try { await window.AkashaStore.init(); } catch(e) { document.getElementById("save-state").textContent="连接失败 · 点击重新加载"; document.getElementById("save-state").onclick=()=>location.reload(); els.send.disabled=true;document.getElementById("wb-notice").textContent=e.message;return; }
+    await loadConvos();
 
     els.think.classList.toggle('on', state.think);
     els.think.textContent = state.think ? '🧠 深度思考 · 开' : '💡 深度思考 · 关';
@@ -1089,7 +1078,7 @@
     refreshStatus();
     setInterval(refreshStatus, 20000);
     autoGrow();
-    els.input.focus();
+    await window.AkashaWorkbench.init();
   }
 
   // 对外暴露的最小接口。

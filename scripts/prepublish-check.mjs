@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 export function scanTree(root, { dependencyTree = false } = {}) {
   const findings = [], files = [];
-  const excluded = new Set(['.git', 'node_modules', 'dist', 'out', 'outputs', 'release', 'temp', 'cache', 'logs', 'work', 'test-results']);
+  const excluded = new Set(['.git', 'node_modules', 'dist', 'out', 'outputs', 'release', 'temp', 'cache', 'logs', 'work', 'test-results', 'userData']);
   const patterns = [
     ['key', /\bsk-[A-Za-z0-9_-]{12,}/],
     ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],

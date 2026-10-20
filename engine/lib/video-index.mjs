@@ -6,8 +6,8 @@ export function loadVideoIndex(file) {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
     const entries = new Map();
     for (const row of parsed.entries || []) {
-      if (!Number.isSafeInteger(row.entryId) || !Number.isSafeInteger(row.videoIndex) || !row.url || !row.title) continue;
-      entries.set(`${row.entryId}:${row.videoIndex}`, { title: String(row.title), url: String(row.url) });
+      if (!Number.isSafeInteger(row.entryId) || !Number.isSafeInteger(row.videoIndex) || (!row.url && !row.localPath) || !row.title) continue;
+      entries.set(`${row.entryId}:${row.videoIndex}`, { title: String(row.title), url: String(row.url || ''), localPath: row.localPath ? String(row.localPath) : '' });
     }
     return { configured: true, entries };
   } catch {

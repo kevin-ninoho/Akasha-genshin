@@ -1,7 +1,23 @@
 (function () {
   'use strict';
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]; }); }
-  window.AkashaMedia = { render: function (b) { return '<div class="video-choices">' + (b.items || []).map(function (v) { return '<button class="video-open" data-video-open="' + v.entryId + '" data-video-index="' + v.videoIndex + '">' + esc(v.title) + ' · 选择片段</button>'; }).join('') + '</div>'; } };
+  // 视频条目按钮：**能取到本体就开「选择片段」，取不到就标成元数据**。
+  //
+  // 块里带 availability 字段（'metadata-only' 表示这条只有观测枢元数据）。
+  // 早先这里一律画成不可点的 span —— 结果是「视频分段导出」整个从界面上消失了，
+  // 而下面的选段弹窗、场景网格、起止时间、生成片段、下载那些代码其实一行都没删。
+  window.AkashaMedia = {
+    render: function (b) {
+      return '<div class="video-choices">' + (b.items || []).map(function (v) {
+        var onlyMeta = v.availability === 'metadata-only' || b.availability === 'metadata-only';
+        if (onlyMeta) {
+          return '<span class="video-open metadata-only">' + esc(v.title) + ' · 观测枢元数据（本体不在本地）</span>';
+        }
+        return '<button class="video-open" data-video-open="' + v.entryId + '" data-video-index="' + v.videoIndex + '">' +
+          esc(v.title) + ' · 选择片段</button>';
+      }).join('') + '</div>';
+    },
+  };
   var panel, generation = 0, current;
   async function api(url, body) {
     var r = await fetch(url, body === undefined ? {} : { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });

@@ -1,0 +1,115 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { WorkspaceStore } from '../engine/lib/workspace-store.mjs';
+import { GameRegistry, genshin } from '../engine/lib/games.mjs';
+import { localURL, localFetch } from '../engine/lib/local-policy.mjs';
+import { loadChain } from '../engine/chat/llm.mjs';
+import { MediaJobs } from '../engine/lib/media-jobs.mjs';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const tempRoot=path.join(root,'..','temp','workbench-tests');fs.mkdirSync(tempRoot,{recursive:true});const temp=fs.mkdtempSync(path.join(tempRoot,'run-'));
+const children=[]; let count=0;
+const ok=name=>{count++;console.log('PASS '+name);};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+try {
+  for(const address of ['https://example.invalid','http://localhost','http://127.0.0.1.example.invalid','file:///test','http://user:pass@127.0.0.1','http://169.254.169.254'])assert.throws(()=>localURL(address));
+  assert.equal(localURL('http://127.0.0.1:1234/v1').hostname,'127.0.0.1');
+  ok('external URLs, credentials and DNS hostnames rejected before network access');
+  let destinationHits=0;
+  const destination=http.createServer((req,res)=>{destinationHits++;res.end('unexpected');});
+  await new Promise(r=>destination.listen(0,'127.0.0.1',r));
+  const redirect=http.createServer((req,res)=>{res.writeHead(302,{Location:'http://127.0.0.1:'+destination.address().port});res.end();});
+  await new Promise(r=>redirect.listen(0,'127.0.0.1',r));
+  await assert.rejects(localFetch('http://127.0.0.1:'+redirect.address().port));
+  assert.equal(destinationHits,0);await Promise.all([new Promise(r=>redirect.close(r)),new Promise(r=>destination.close(r))]);
+  ok('redirect cannot relay a request or corpus payload');
+  const configDir=path.join(temp,'config');fs.mkdirSync(configDir);
+  fs.writeFileSync(path.join(configDir,'llm.config.json'),JSON.stringify({baseUrl:'http://127.0.0.1:1/v1',fallback:{baseUrl:'https://example.invalid/v1',model:'external'}}));
+  const oldConfig=process.env.KB_LLM_CONFIG_PATH;delete process.env.KB_LLM_CONFIG_PATH;
+  assert.equal(loadChain(configDir).length,1);
+  if(oldConfig)process.env.KB_LLM_CONFIG_PATH=oldConfig;
+  ok('external fallback provider never enters generation chain');
+
+  const dbFile=path.join(temp,'users.sqlite');let store=new WorkspaceStore(dbFile);
+  const registry=new GameRegistry([genshin,{id:'fiction',label:'Fiction',capabilities:{research:true,media:false},retrieve:q=>({title:'fiction:'+q})}]);
+  assert.notEqual(registry.scope('owner','genshin','same'),registry.scope('owner','fiction','same'));
+  assert.throws(()=>registry.get('unconfigured'));
+  const fake=registry.get('fiction');assert.equal(fake.capabilities.media,false);assert.equal(fake.retrieve('same').title,'fiction:same');
+  store.put('owner','genshin','research','same',{title:'Original'},0);
+  store.put('owner','fiction','research','same',{title:'Other game'},0);
+  assert.equal(store.get('owner','genshin','research','same').data.title,'Original');
+  assert.equal(store.get('owner','fiction','research','same').data.title,'Other game');
+  assert.equal(store.get('stranger','genshin','research','same'),null);
+  ok('fake second adapter isolates duplicate IDs, retrieval, capabilities and sessions');
+  assert.throws(()=>store.put('owner','genshin','research','same',{title:'overwrite'},0),e=>e.code==='revision_conflict');
+  const payload={blocks:[{kind:'test',text:'x'.repeat(4*1024**2)}]};
+  store.put('owner','genshin','conversations','history',payload,0);
+  for(const kind of ['growth','pv'])store.put('owner','genshin',kind,'saved',{checked:{synthetic:true},clips:[{start:1,end:2}]},0);
+  const evidence=store.capture('owner','genshin',[{title:'Artificial source',text:'Synthetic evidence',ref:1}],'rev1');
+  assert.throws(()=>store.evidence('stranger','genshin',evidence,'rev1'),e=>e.status===404);
+  assert.throws(()=>store.evidence('owner','fiction',evidence,'rev1'),e=>e.status===404);
+  assert.equal(store.evidence('owner','genshin',evidence,'rev2').stale,true);
+  store.close();store=new WorkspaceStore(dbFile);
+  assert.equal(store.get('owner','genshin','conversations','history').data.blocks[0].text.length,4*1024**2);
+  for(const kind of ['growth','pv'])assert.equal(store.get('owner','genshin',kind,'saved').data.checked.synthetic,true);
+  assert.equal(store.evidence('owner','genshin',evidence,'rev1').items[0].text,'Synthetic evidence');
+  store.db.exec('PRAGMA query_only=ON');
+  assert.throws(()=>store.put('owner','genshin','research','write-fails',{},0));
+  store.db.exec('PRAGMA query_only=OFF');assert.equal(store.get('owner','genshin','research','same').data.title,'Original');store.close();
+  ok('large cards, all workspaces and evidence survive restart; conflict/write failures do not discard data');
+  // 媒体来源：**两种都支持** —— 本机导入（localPath）与观测枢直链（url）。
+  // 但直链只放行米哈游官方图床（见 media-jobs.mjs 的 allowed()），
+  // 所以 example.invalid 这种会在**抓取阶段**失败，而不是登记阶段。
+  // 早先这里是 assert.throws(jobs.scenes) —— 那编码的是「只允许本地」，已不成立。
+  const jobs=new MediaJobs({root:path.join(temp,'jobs'),getSource:()=>({title:'external',url:'https://example.invalid/video.mp4'})});
+  const externalJob=jobs.scenes(1,0,'owner');
+  await sleep(600);
+  const externalState=jobs.get(externalJob.id,'owner');
+  assert.equal(externalState.state,'failed','非官方域名的直链应当在抓取阶段失败');
+  assert.match(String(externalState.error||''),/视频来源不可用|视频下载失败/,'失败原因要说清是来源问题');
+  const started=jobs.enqueue('synthetic','owner','cancel',async progress=>{await sleep(50);progress(50);return {};});
+  jobs.cancel(started.id,'owner');await sleep(100);assert.equal(jobs.get(started.id,'owner').state,'cancelled');
+  assert.equal(jobs.get(started.id,'stranger'),null);
+  fs.writeFileSync(path.join(temp,'jobs','jobs','interrupted.json'),JSON.stringify({id:'interrupted',owner:'owner',state:'running'}));
+  const restarted=new MediaJobs({root:path.join(temp,'jobs'),getSource:()=>null});
+  assert.equal(restarted.get('interrupted','owner').state,'failed');
+  ok('媒体只放行官方图床；取消、owner 校验与中断任务恢复都正常');
+
+  const source=path.join(temp,'source'),data=path.join(temp,'data');
+  fs.mkdirSync(path.join(source,'原神'),{recursive:true});
+  fs.writeFileSync(path.join(source,'原神','【原神】测试角色.md'),'# 测试角色\n\n## 基础档案\n\n| 字段 | 内容 |\n| --- | --- |\n| 身份 | 虚构测试人员 |\n\n## 角色故事\n\n#### 故事一\n\n测试角色在模拟地区研究合成星图。此段为人工构造的测试数据。\n');
+  const env={...process.env,KB_SOURCE_DIR:source,KB_DATA_DIR:data,KB_CLIENT_TOKEN:'synthetic-workbench-test',KB_LLM_PROVIDER:'extractive',KB_LLM_CONFIG_PATH:path.join(temp,'absent.json'),KB_VIDEO_INDEX_PATH:'',AKASHA_WORKSPACE_DB:path.join(temp,'api-users.sqlite'),KB_MEDIA_CACHE:path.join(temp,'api-media'),KB_CLIENT_RATE:'1000'};
+  const build=spawnSync(process.execPath,[path.join(root,'engine','build.mjs')],{cwd:root,env,windowsHide:true,stdio:'ignore'});assert.equal(build.status,0);
+  const port=46000+Math.floor(Math.random()*1000);
+  const child=spawn(process.execPath,[path.join(root,'engine','serve-client.mjs')],{cwd:root,env:{...env,KB_CLIENT_PORT:String(port)},windowsHide:true,stdio:'ignore'});children.push(child);
+  const front=spawn(process.execPath,[path.join(root,'client','servers','chat-app.mjs'),'--port',String(port+1000)],{cwd:root,env:{...env,KB_V1_UPSTREAM:'http://127.0.0.1:'+port},windowsHide:true,stdio:'ignore'});children.push(front);
+  for(let n=0;n<100;n++){try{if((await fetch('http://127.0.0.1:'+(port+1000)+'/health')).ok)break;}catch{}await sleep(50);}
+  const base='http://127.0.0.1:'+port,headers={Authorization:'Bearer '+env.KB_CLIENT_TOKEN,'Content-Type':'application/json'};
+  const call=(p,body)=>fetch(base+p,{headers,method:body===undefined?'GET':'POST',...(body===undefined?{}:{body:JSON.stringify(body)})});
+  assert.equal((await fetch(base+'/v1/workspace/research')).status,401);
+  assert.equal((await call('/v1/workspace/research?gameId=fiction')).status,400);
+  assert.equal((await call('/v1/chat/reset',{sessionId:'same'})).status,200);
+  const response=await call('/v1/chat',{sessionId:'same',message:'测试角色的故事'});
+  const events=(await response.text()).split('\n').filter(l=>l.startsWith('data:')).map(l=>JSON.parse(l.slice(5)));
+  const answerId=events.find(e=>e.type==='evidence').answerId;
+  const evidenceResponse=await (await call('/v1/evidence/'+answerId)).json();
+  assert.ok(evidenceResponse.items.some(s=>s.text.includes('合成星图')));
+  assert.equal((await call('/v1/evidence/not-issued')).status,404);
+  assert.equal(events.some(e=>e.type==='thinking'),false);
+  assert.ok(events.some(e=>e.type==='progress'));
+  assert.ok(events.find(e=>e.type==='done').answer);
+  assert.equal((await call('/v1/plan',{roster:[{charId:99999,level:1}],target:{level:90}})).status,200);
+  const spoof=await fetch('http://127.0.0.1:'+(port+1000)+'/v1/workspace/research',{headers:{Origin:'https://example.invalid'}});
+  assert.equal(spoof.status,403);
+  assert.equal((await fetch('http://127.0.0.1:'+(port+1000)+'/kb/api/chat/reset')).status,404);
+  const page=await fetch('http://127.0.0.1:'+(port+1000)+'/');assert.match(page.headers.get('content-security-policy'),/connect-src 'self'/);
+  ok('real API: authentication, unavailable games, reset, issued evidence, progress, missing data and browser boundaries');
+  console.log(`WORKBENCH ${count}/${count} passed`);
+} finally {
+  for(const c of children)c.kill();
+  await Promise.all(children.map(c=>new Promise(r=>c.exitCode!==null?r():c.once('exit',r))));
+  fs.rmSync(temp,{recursive:true,force:true});
+}

@@ -627,6 +627,7 @@ export function openWorkspace(dir, { readonly = false } = {}) {
     return new Workspace(db, ':memory:', false);
   }
   fs.mkdirSync(dir, { recursive: true });
+  if(readonly) return new Workspace(new DatabaseSync(file,{readOnly:true}),file,false);
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(SCHEMA);

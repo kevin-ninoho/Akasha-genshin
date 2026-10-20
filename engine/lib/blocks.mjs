@@ -29,6 +29,7 @@ import { buildPlan } from './plan.mjs';
 // 本文件只保留**怎么造块**。注册表不 import 本文件，所以无循环依赖。
 import { matchSkills, resolveSkills, buildFromSkills, needsCharacterSet } from './skills/index.mjs';
 import { run as runStats } from './skills/stats.mjs';
+import { videoCatalog } from './media-jobs.mjs';
 
 /** 客户端按 kind 分派渲染器。 */
 export const BLOCK_KINDS = [
@@ -398,7 +399,36 @@ function buildConstellation(v1, char) {
   };
 }
 
-/** ⑨ 培养材料：分阶段 + 材料名 + 数量 + 图标。 */
+/**
+ * 「条目名 → 本地图标 URL」解析器。
+ *
+ * 返回 `/v1/asset/obc/<id>` 这种**同源**路径 —— 客户端有 CSP `img-src 'self'`，
+ * 直接用米哈游 CDN 的原始 URL 会被浏览器拦掉，界面上就是一片灰块。
+ * 本地文件缺失时返回空串，调用方可以退回原始 URL 或纯文字。
+ *
+ * 为什么需要一个「惰性 prepared statement」包着：这个函数会在每次造块时被调用，
+ * 每次重新 prepare 会明显变慢，而模块级又不能提前拿到 v1。
+ */
+function makeIconResolver(v1) {
+  if (!v1?.obc) return () => '';
+  let stmt = null;
+  return (name) => {
+    if (!name) return '';
+    try {
+      if (!stmt) {
+        stmt = v1.obc.prepare(
+          `SELECT id FROM obc_entries WHERE name = ? AND kind IN (${OBC_ICON_KINDS.map(() => '?').join(',')}) LIMIT 1`,
+        );
+      }
+      const e = stmt.get(String(name), ...OBC_ICON_KINDS);
+      return e ? `/v1/asset/obc/${e.id}` : '';
+    } catch { return ''; }
+  };
+}
+
+/**
+ * ⑨ 培养材料：分阶段 + 材料名 + 数量 + 图标。
+ */
 function buildAscension(v1, char) {
   if (!char) return null;
   const m = modulesOf(v1, char);
@@ -406,13 +436,20 @@ function buildAscension(v1, char) {
   // 只保留「突破」阶段；「1级属性」「90级属性」这种属性段没有材料意义
   const stages = m.ascensions.filter((a) => a.materials.length && /突破/.test(a.stage));
   if (!stages.length) return null;
+  // 材料图标走本地 /v1/asset/obc/<id>（同源，CSP 放行）。
+  // 模块数据里原本带的是米哈游 CDN 的原始 URL，客户端会拦掉 —— 只在本地缺图时退回它。
+  const iconUrl = makeIconResolver(v1);
   return {
     kind: 'ascension',
     title: `${char.row.name} · 突破培养材料`,
     total: stages.length,
     items: stages.slice(0, LIMIT.ascensionStages).map((a) => ({
       stage: a.stage,
-      materials: a.materials.map((x) => ({ name: x.name, amount: x.amount, icon: x.icon })),
+      materials: a.materials.map((x) => ({
+        name: x.name,
+        amount: x.amount,
+        icon: iconUrl(x.name) || x.icon || '',
+      })),
     })),
     truncated: stages.length > LIMIT.ascensionStages,
     source: MODULE_SOURCE_NOTE,
@@ -602,17 +639,27 @@ const SKILL_HANDLERS = {
   plan: (c) => buildPlanBlock(c.v1, c.question, c.char, c.entities, c.roster),
   list: (c) => buildList(c.v1, c.question),
   video: (c) => {
-    if (!c.videoIndex || !c.videoIndex.configured) return null;
     const name = c.char?.row?.name || (c.entities || []).find((e) => e.name)?.name || '';
-    const items = [...c.videoIndex.entries.entries()]
-      .map(([key, item]) => {
-        const [entryId, videoIndex] = key.split(':').map(Number);
-        return { entryId, videoIndex, title: item.title };
-      })
-      .filter((item) => !name || item.title.includes(name))
-      .slice(0, 6);
+    // ① 有视频索引（能定位到具体条目+序号，可剪辑导出）→ 优先用它
+    if (c.videoIndex && c.videoIndex.configured) {
+      const items = [...c.videoIndex.entries.entries()]
+        .map(([key, item]) => {
+          const [entryId, videoIndex] = key.split(':').map(Number);
+          return { entryId, videoIndex, title: item.title, ...(item.localPath ? { local: true } : {}) };
+        })
+        .filter((item) => !name || item.title.includes(name))
+        .slice(0, 6);
+      if (items.length) {
+        return { kind: 'video-scenes', title: 'PV 片段选择', items, total: items.length, source: '米游社观测枢' };
+      }
+    }
+    // ② 没有索引 → 退回观测枢元数据目录（只列标题，标成不可剪辑）
+    if (!c.v1.obc) return null;
+    let rows = [];
+    try { rows = c.v1.obc.prepare("SELECT id,name,raw_json,kind FROM obc_entries WHERE kind IN ('char-video','other-video','cutscene') AND name LIKE ? ORDER BY name LIMIT 40").all(`%${name}%`); } catch { /* 表结构不同就返回空 */ }
+    const items = videoCatalog(rows).slice(0, 6);
     if (!items.length) return null;
-    return { kind: 'video-scenes', title: 'PV 片段选择', items, total: items.length, source: '米游社观测枢' };
+    return { kind: 'video-scenes', title: 'PV 视频档案', items, total: items.length, source: '米游社观测枢', availability: 'metadata-only' };
   },
 };
 
@@ -682,7 +729,7 @@ export function blockHintForPrompt(blocks, question = '') {
   if (!blocks || !blocks.length) return '';
   const parts = blocks.map((b) => {
     if (b.kind === 'image') return `图片（${b.title}）：立绘/头像已经直接展示给用户了`;
-    if (b.kind === 'video-scenes') return `视频（${b.title}）：已列出 ${(b.items || []).length} 个视频并提供连续镜头选段工具；已展示的标题为 ${(b.items || []).map(i=>i.title).join('、')}。不要再次罗列这些标题，不要给整段视频链接；只补充角色 PV 与版本 PV 的区别或必要剧情背景`;
+    if (b.kind === 'video-scenes') return `视频（${b.title}）：已列出 ${(b.items || []).length} 个来自米游社观测枢的元数据条目，视频本体不在本地；标题为 ${(b.items || []).map(i=>i.title).join('、')}。不要声称可在此直接预览或裁剪，也不要给出视频链接；只补充角色 PV 与版本 PV 的区别或必要剧情背景`;
     if (b.kind === 'voice-list') return `语音列表（${b.title}）：共 ${b.total} 条，已按类分组展示`;
     if (b.kind === 'relation-graph') return `关系图（${b.title}）：已用图展示 ${b.edges ? b.edges.length : 0} 条关系`;
     if (b.kind === 'stat-table') {

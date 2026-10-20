@@ -30,6 +30,7 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  // 拿技能头像。失败一律返回空对象（退回 emoji），不能让技能面板打不开。
   function loadIcons() {
     if (ICONS) return Promise.resolve(ICONS);
     if (iconsInflight) return iconsInflight;

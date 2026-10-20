@@ -43,6 +43,9 @@ try {
   assert.equal(status.body.capabilities.corpus, false);
   assert.equal(status.body.capabilities.videoIndex, false);
   ok('status stays authenticated and reports missing corpus/index capabilities');
+  const catalog = await api('/v1/videos/catalog?q=synthetic');
+  assert.equal(catalog.status, 200); assert.deepEqual(catalog.body.items, []); assert.equal(catalog.body.bodyAvailableLocally, false);
+  ok('OBC metadata catalogue remains available without a local video index');
   const retrieve = await api('/v1/retrieve', { question: '测试' });
   assert.equal(retrieve.status, 503);
   assert.equal(retrieve.body.error.code, 'corpus_not_configured');
@@ -52,7 +55,7 @@ try {
   ok('chat returns configuration guidance before entering SSE');
   const video = await api('/v1/videos/1');
   assert.equal(video.status, 503);
-  assert.match(video.body.error.message, /未配置视频索引/);
+  assert.match(video.body.error.message, /未配置本地视频索引/);
   assert.doesNotMatch(JSON.stringify(video.body), /https?:|[A-Z]:\\|\.mp4/i);
   ok('unconfigured video index fails clearly without source leakage');
   for (const route of ['/v1/videos/1', '/v1/media/jobs/test', '/v1/media/assets/test/thumb/0']) {
@@ -60,15 +63,15 @@ try {
   }
   ok('video metadata, job state and media assets require authentication');
   // Seed a synthetic cached index; no source is downloaded and no copyrighted fixture is needed.
-  const sourceUrl = 'https://example.invalid/synthetic.mp4';
+  const sourceUrl = path.join(temp,'synthetic.mp4');fs.writeFileSync(sourceUrl,'synthetic');const stamp=fs.statSync(sourceUrl);
   const cache = path.join(temp, 'cached-media');
-  const key = crypto.createHash('sha256').update('1:0:' + sourceUrl).digest('hex').slice(0, 24);
+  const key = crypto.createHash('sha256').update('1:0:' + sourceUrl + stamp.size + ':' + stamp.mtimeMs).digest('hex').slice(0, 24);
   const descriptor = path.join(cache, key); fs.mkdirSync(path.join(descriptor, 'thumbs'), { recursive: true });
   const relativeThumb = `/v1/media/assets/${key}/thumb/0`;
   fs.writeFileSync(path.join(descriptor, 'thumbs', '0.jpg'), Buffer.from([255, 216, 255, 217]));
   fs.writeFileSync(path.join(descriptor, 'index.json'), JSON.stringify({ indexVersion: 2, threshold: 0.30, duration: 12, hasAudio: true, scenes: [{ index: 0, start: 0, end: 6, thumbnail: relativeThumb }, { index: 1, start: 6, end: 12, thumbnail: relativeThumb }] }));
   const indexFile = path.join(temp, 'video-index.json');
-  fs.writeFileSync(indexFile, JSON.stringify({ entries: [{ entryId: 1, videoIndex: 0, title: 'Synthetic PV', url: sourceUrl }] }));
+  fs.writeFileSync(indexFile, JSON.stringify({ entries: [{ entryId: 1, videoIndex: 0, title: 'Synthetic PV', localPath: sourceUrl }] }));
   const configuredBase = `http://127.0.0.1:${port + 1}`;
   owned.push(spawn(process.execPath, [path.join(engine, 'serve-client.mjs')], { cwd: engine, windowsHide: true, stdio: 'ignore', env: { ...process.env, KB_CLIENT_PORT: String(port + 1), KB_CLIENT_TOKEN: token, KB_DATA_DIR: path.join(temp, 'empty-data'), KB_VIDEO_INDEX_PATH: indexFile, KB_MEDIA_CACHE: cache, KB_LLM_PROVIDER: 'extractive' } }));
   let configured = false; for (let i = 0; i < 100; i++) { try { configured = (await fetch(configuredBase + '/v1/health')).ok; } catch {} if (configured) break; await sleep(50); } assert.ok(configured);

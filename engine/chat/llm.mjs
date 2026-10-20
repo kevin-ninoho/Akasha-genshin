@@ -7,6 +7,7 @@
 // 没有可用模型时，provider = 'extractive'：不生成，直接把检索结果整理成人能读的摘要。
 // 这不是占位符，是真实的降级模式，保证「检索 → 展示 → 引用跳转」这条链路始终可用。
 
+import { localURL } from '../lib/local-policy.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -46,6 +47,7 @@ export function loadConfig(dir) {
   if (process.env.KB_LLM_API_KEY) cfg.apiKey = process.env.KB_LLM_API_KEY;
   if (process.env.KB_LLM_PROVIDER) cfg.provider = process.env.KB_LLM_PROVIDER;
   cfg.baseUrl = String(cfg.baseUrl).replace(/\/+$/, '');
+  try { localURL(cfg.baseUrl); } catch { cfg.provider = 'extractive'; cfg.localBlocked = true; }
   return cfg;
 }
 
@@ -70,7 +72,8 @@ export function loadChain(dir) {
     delete merged.fallback;
     merged.baseUrl = String(merged.baseUrl).replace(/\/+$/, '');
     // 备用链路跟主链路完全一样就没意义，跳过
-    if (merged.baseUrl !== cfg.baseUrl || merged.model !== cfg.model) {
+    let permitted = true; try { localURL(merged.baseUrl); } catch { permitted = false; }
+    if (permitted && (merged.baseUrl !== cfg.baseUrl || merged.model !== cfg.model)) {
       chain.push({ role: 'fallback', cfg: merged, model: merged.model });
     }
   }
@@ -165,6 +168,7 @@ export async function resolveProvider(cfg) {
  *        think=true 强制开思考；think=false 强制关思考；留空则用 cfg.thinking
  */
 export async function* streamChat(cfg, messages, opts = {}) {
+  localURL(cfg.baseUrl);
   const model = opts.model || cfg.model;
   const payload = {
     model,
