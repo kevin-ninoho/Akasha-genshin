@@ -659,7 +659,8 @@ const SKILL_HANDLERS = {
     try { rows = c.v1.obc.prepare("SELECT id,name,raw_json,kind FROM obc_entries WHERE kind IN ('char-video','other-video','cutscene') AND name LIKE ? ORDER BY name LIMIT 40").all(`%${name}%`); } catch { /* 表结构不同就返回空 */ }
     const items = videoCatalog(rows).slice(0, 6);
     if (!items.length) return null;
-    return { kind: 'video-scenes', title: 'PV 视频档案', items, total: items.length, source: '米游社观测枢', availability: 'metadata-only' };
+    // 不标 metadata-only：服务端会按需从官方图床取回本体，所以这些条目**可以剪辑**。
+      return { kind: 'video-scenes', title: 'PV 片段选择', items, total: items.length, source: '米游社观测枢' };
   },
 };
 

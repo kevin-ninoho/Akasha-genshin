@@ -7,3 +7,23 @@ html[data-theme=light]{--bg:#eeeade;--bg-2:#e6e2d5;--panel:#f8f5ec;--panel-2:#e9
 @media(max-width:760px){.side{position:fixed;z-index:30;inset:0 auto 0 0;width:226px;transform:translateX(-100%);margin:0!important}.side.open{transform:translateX(0)}.only-narrow{display:inline-flex!important}.workbench{padding:18px}.work-cards{grid-template-columns:1fr}.work-card{min-height:150px}.card-bottom{margin-top:10px}.observatory{padding:24px}.observatory h2{font-size:27px}.orbit{right:-110px}.main .top{padding:0 15px}.wb-heading{flex-direction:column}.compare .evidence-items{grid-template-columns:1fr}.main .save-state{max-width:150px}.wb-panel{padding:18px}.editor-grid{gap:0}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 .dot.local{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+
+/* ─── 考据研究：检索结果与已收集依据 ──────────────────────────────
+   这些卡片是「知识库有多强」的门面：每条依据都带官方原文链接，
+   所以链接要做成明显的、可点的，而不是灰字。 */
+.wb-hits-meta{font-size:11px;color:var(--muted);margin:4px 0 12px;letter-spacing:.3px}
+.source-card{border:1px solid var(--border);background:var(--bg);border-radius:4px;padding:14px 16px;margin-bottom:10px}
+.source-card.collected{border-color:var(--accent);background:var(--accent-soft)}
+.source-line{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.source-line b{font-size:13px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.source-type{font-size:10px;letter-spacing:1px;color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:1px 6px;flex:none;text-transform:uppercase}
+.source-text{font-size:12px;line-height:1.9;color:var(--text);margin:0 0 8px;opacity:.86}
+.source-link{display:inline-block;font-size:11px;color:var(--accent);text-decoration:none;border-bottom:1px dashed var(--accent);padding-bottom:1px}
+.source-link:hover{color:var(--text);border-bottom-color:var(--text)}
+.wb-button[disabled]{opacity:.45;cursor:default}
+.wb-button[disabled]:hover{border-color:var(--border);background:var(--panel)}
+.wb-hint{font-size:11px;color:var(--muted);margin:8px 0 0;line-height:1.8}
+/* PV 页：观测枢搜索结果一行两个按钮（剪辑这段 / 加入策划）*/
+.library-row{display:flex;align-items:center;gap:8px;margin:0 0 10px}
+.library-row .library-video{margin:0;flex:1;min-width:0}
+.library-row .wb-button{flex:none}

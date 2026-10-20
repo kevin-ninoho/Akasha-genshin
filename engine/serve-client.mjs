@@ -11,7 +11,7 @@ import { assessRetrieval, auditAnswer } from './lib/grounding.mjs';
 import { buildBlocks, summarizeBlocks, blockHintForPrompt, BLOCK_KINDS } from './lib/blocks.mjs';
 import { createRetriever, assembleContext, DEFAULT_BUDGET } from './chat/retrieve.mjs';
 import { runChat, resetSession } from './chat/agent.mjs';
-import { MediaJobs, videoCatalog } from './lib/media-jobs.mjs';
+import { MediaJobs, videoCatalog, videoSources } from './lib/media-jobs.mjs';
 import { loadVideoIndex } from './lib/video-index.mjs';
 import { corpusRevision } from './lib/corpus-revision.mjs';
 import { loadConfig, resolveProvider, resolveThinking } from './chat/llm.mjs';
@@ -192,9 +192,23 @@ function doRetrieve(question, opts = {}) {
 
 // ------------------------------------------------------------------ 路由
 
+// 视频来源解析：**两层**。
+//   ① 先查视频索引（里面可能有本机导入的素材，带 localPath）
+//   ② 索引里没有，就直接从观测枢条目现取 URL —— 这样不配索引文件也能剪辑 PV，
+//      也就不用为了「能剪片子」强制用户跑一遍 build-video-index。
+// 返回 { title, url } 或 { title, localPath }，交给 MediaJobs 决定走哪条取数路径。
 const media = new MediaJobs({root:process.env.KB_MEDIA_CACHE || path.join(DATA,'media-cache'),getSource:(id,index)=>{
-  if (!videoIndex.configured) return { error: '未配置视频索引。请设置 KB_VIDEO_INDEX_PATH。' };
-  return videoIndex.entries.get(`${id}:${index}`) || null;
+  const hit = videoIndex.entries.get(`${id}:${index}`);
+  if (hit) return hit;
+  try {
+    const row = v1?.obc?.prepare(
+      "SELECT name,raw_json FROM obc_entries WHERE id=? AND kind IN ('char-video','other-video','cutscene')",
+    ).get(id);
+    if (!row) return null;
+    const url = videoSources(JSON.parse(row.raw_json))[index];
+    if (!url) return null;
+    return { title: row.name, url };
+  } catch { return null; }
 }});
 let statusCache = null;
 const HANDLED = new Set(['games', 'workspace', 'evidence', 'meta', 'query', 'record', 'asset', 'retrieve', 'chat', 'health', 'usage', 'domains', 'demo', 'videos', 'media', 'status', 'plan', 'skills', 'skill-icons']);

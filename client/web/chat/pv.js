@@ -3,11 +3,11 @@
     async render(host, data, ui) {
       const { esc, field, button, heading, S, save, flash, isCurrent }=ui;
       data.clips ||= []; data.jobs ||= []; data.references ||= [];
-      host.innerHTML=heading('CREATE / FRAME','PV 创作','观测枢元数据整理 · 本机视频可选剪辑',button('＋ 添加本地视频','import-video','primary'))+
-        `<section class="wb-panel">${field('项目名称','title',data.title)}<h3>观测枢视频档案</h3><p class="wb-callout">这里只整理米游社观测枢中的视频条目元数据。视频本体不在本地，不会自动下载；可加入策划清单并记录时间点。需要预览、裁切或导出时，请另行添加本机视频。</p><div class="search-row"><input id="catalog-search" placeholder="搜索角色或视频标题" aria-label="搜索观测枢视频元数据">${button('搜索档案','search-catalog')}</div><div id="catalog-library"></div><div id="pv-references"></div></section>
-        <section class="wb-panel"><h3>本机剪辑素材</h3><p>只有本机视频可建立镜头索引、预览和导出；片段最长 60 秒。</p><div class="search-row"><input id="video-search" placeholder="搜索本地素材标题" aria-label="搜索本地素材">${button('搜索素材','search-video')}</div><div id="video-library"></div></section>
-        <section class="wb-panel"><div class="section-heading"><h3 id="pv-source-title">镜头工作台</h3><span id="pv-stage" class="muted"></span></div><div id="pv-scenes"><p class="wb-empty">选择一份本地视频，建立镜头索引。</p></div>
-        <div id="pv-range" hidden><div class="form-row">${field('开始（秒）','start',0,'number')}${field('结束（秒）','end',8,'number')}${button('加入片段清单','add-clip')}${button('生成预览 / 导出','export-clip','primary')}</div></div><div id="pv-preview"></div></section>
+      host.innerHTML=heading('CREATE / FRAME','PV 创作','观测枢 PV 直接选段导出 · 也可用本机视频',button('＋ 添加本地视频','import-video','primary'))+
+        `<section class="wb-panel"><h3>观测枢 PV</h3><p class="wb-callout">米游社观测枢的 PV / 角色演示 / 过场动画可以直接选中「剪辑这段」：服务端会按需从官方图床取回本体，建好镜头索引，然后在下面的镜头工作台里按秒选段导出。</p><div class="search-row"><input id="catalog-search" placeholder="搜索角色或视频标题（如「胡桃」「钟离」）" aria-label="搜索观测枢视频">${button('搜索','search-catalog')}</div><div id="catalog-library"></div><div id="pv-references"></div></section>
+        <section class="wb-panel"><h3>本机剪辑素材</h3><p>自己导入的本地视频。同样可以建镜头索引、预览和导出；单段最长 60 秒。</p><div class="search-row"><input id="video-search" placeholder="搜索本地素材标题" aria-label="搜索本地素材">${button('搜索','search-video')}</div><div id="video-library"></div></section>
+        <section class="wb-panel"><div class="section-heading"><h3 id="pv-source-title">镜头工作台</h3><span id="pv-stage" class="muted"></span></div><div id="pv-scenes"><p class="wb-empty">从上面选一份视频（观测枢或本机），建立镜头索引。</p></div>
+        <div id="pv-range" hidden><div class="form-row">${field('开始（秒）','start',0,'number')}${field('结束（秒）','end',8,'number')}${button('加入片段清单','add-clip')}${button('生成预览 / 导出','export-clip','primary')}</div><p class="wb-hint">点场景缩略图可以选起点、再点一次选终点；也可以直接填秒数。</p></div><div id="pv-preview"></div></section>
         <section class="wb-panel"><h3>片段清单</h3><div id="pv-clips"></div></section><section class="wb-panel"><h3>处理队列</h3><div id="pv-jobs"></div></section>`;
       let source=data.source||null, index=data.index||null, first=null;
       const persist=()=>save(data).catch(e=>flash(e.message));
@@ -16,8 +16,11 @@
       }
       async function catalog(){
         try{const q=host.querySelector('#catalog-search').value;const j=await S.api('/v1/videos/catalog?q='+encodeURIComponent(q));if(!isCurrent())return;
-          host.querySelector('#catalog-library').innerHTML=j.items.map(s=>`<button class="library-video" data-catalog="${esc(JSON.stringify(s))}"><span>＋</span>${esc(s.title)} <small>观测枢 · 元数据</small></button>`).join('')||'<p class="wb-empty">没有匹配的视频元数据条目。</p>';
-        }catch{if(isCurrent())host.querySelector('#catalog-library').textContent='观测枢视频元数据暂不可用。';}
+          // 每条结果两个动作：
+          //   ▷ 剪辑这段 —— 直接设为剪辑源并建镜头索引（服务端会去官方图床取本体）
+          //   ＋ 加入策划 —— 只记一条策划清单，不占用剪辑器
+          host.querySelector('#catalog-library').innerHTML=j.items.map(s=>`<div class="library-row"><button class="library-video" data-clip="${esc(JSON.stringify(s))}"><span>▷</span>${esc(s.title)} <small>剪辑这段</small></button><button class="wb-button" data-catalog="${esc(JSON.stringify(s))}">加入策划</button></div>`).join('')||'<p class="wb-empty">没有匹配的视频。换个角色名试试（例如「胡桃」「钟离」）。</p>';
+        }catch(e){if(isCurrent())host.querySelector('#catalog-library').textContent='观测枢视频暂不可用：'+(e.message||'');}
       }
       function clips(){
         host.querySelector('#pv-clips').innerHTML=data.clips.map((c,i)=>`<div class="recent-row"><span>◇</span><span><b>${esc(c.title)}</b><small>${Number(c.start).toFixed(2)} — ${Number(c.end).toFixed(2)} 秒</small></span><button class="wb-button" data-use-clip="${i}">继续编辑</button><button class="wb-button" data-delete-clip="${i}">移除</button></div>`).join('')||'<p class="wb-empty">片段清单会随项目保存。</p>';
@@ -78,7 +81,19 @@
           if(action==='search-catalog')await catalog();
           const metadata=e.target.closest('[data-catalog]');
           if(metadata){const item=JSON.parse(metadata.dataset.catalog);if(!data.references.some(r=>r.entryId===item.entryId&&r.videoIndex===item.videoIndex))data.references.unshift({...item,time:'',note:''});references();await persist();}
-          if(src){source=JSON.parse(src.dataset.source);data.source=source;data.index=null;index=null;first=null;host.querySelector('#pv-stage').textContent='正在建立镜头索引…';await submitJob('scenes');}
+          // 「剪辑这段」：观测枢条目直接当剪辑源。
+          // 服务端会按需从官方图床取回本体再建索引（需要一会儿），
+          // 所以先把状态写进镜头工作台标题，让用户知道在动。
+          const clipSource=e.target.closest('[data-clip]')||e.target.closest('[data-source]');
+          if(clipSource){
+            source=JSON.parse(clipSource.dataset.clip||clipSource.dataset.source);
+            data.source=source;data.index=null;index=null;first=null;
+            host.querySelector('#pv-source-title').textContent=source.title||'镜头工作台';
+            host.querySelector('#pv-range').hidden=true;
+            host.querySelector('#pv-scenes').innerHTML='<p class="wb-empty">正在建立镜头索引：先取回视频本体，再切镜头。稍等，界面会自动更新。</p>';
+            host.querySelector('#pv-stage').textContent='正在建立镜头索引…';
+            await submitJob('scenes');
+          }
           if(scene){const n=Number(scene.dataset.scene);const s=index.scenes[n];if(first===null){first=n;data.start=s.start;data.end=s.end;}else{data.start=index.scenes[Math.min(first,n)].start;data.end=index.scenes[Math.max(first,n)].end;first=null;}showIndex();await persist();}
           if(action==='add-clip'){data.clips.push({...source,...selection()});clips();await persist();}
           if(action==='export-clip')await submitJob('clips',selection());
