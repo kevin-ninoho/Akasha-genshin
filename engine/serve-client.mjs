@@ -11,7 +11,7 @@ import { assessRetrieval, auditAnswer } from './lib/grounding.mjs';
 import { buildBlocks, summarizeBlocks, blockHintForPrompt, BLOCK_KINDS } from './lib/blocks.mjs';
 import { createRetriever, assembleContext, DEFAULT_BUDGET } from './chat/retrieve.mjs';
 import { runChat, resetSession } from './chat/agent.mjs';
-import { MediaJobs, videoCatalog, videoSources } from './lib/media-jobs.mjs';
+import { MediaJobs, videoCatalog, videoSources, videoCategorySummary } from './lib/media-jobs.mjs';
 import { loadVideoIndex } from './lib/video-index.mjs';
 import { corpusRevision } from './lib/corpus-revision.mjs';
 import { loadConfig, resolveProvider, resolveThinking } from './chat/llm.mjs';
@@ -295,15 +295,33 @@ async function routeV1(req, res, url, seg) {
   }
 
   if(head==='videos'){
-    // 观测枢视频只索引条目元数据和视频序号；视频 URL/本体不会返回给客户端，
-    // 也不会由这个接口获取。剪辑能力仍由独立的本机素材库提供。
+    // 观测枢视频目录。**视频 URL/本体不会返回给客户端** ——
+    // 客户端只用 entryId + videoIndex 去 /v1/videos/:id/scenes 登记任务，
+    // 取回本体这件事完全在服务端做（见 MediaJobs 的 download）。
+    //
+    // 支持 ?q=（按标题搜）与 ?category=（按内容类型筛），
+    // 并回一份 categories 统计，客户端据此画筛选栏。
     if(seg[2]==='catalog' && req.method==='GET'){
       const q=String(url.searchParams.get('q')||'').slice(0,120).trim();
+      const cat=String(url.searchParams.get('category')||'').slice(0,40).trim();
       let rows=[];
       try {
-        rows=v1?.obc?.prepare("SELECT id,name,raw_json,kind FROM obc_entries WHERE kind IN ('char-video','other-video','cutscene') AND name LIKE ? ORDER BY name LIMIT 200").all(`%${q}%`) || [];
+        // 先按标题粗筛（SQL 能做）；分类在 JS 里做，因为规则是正则
+        rows=v1?.obc?.prepare(
+          "SELECT id,name,raw_json,kind FROM obc_entries WHERE kind IN ('char-video','other-video','cutscene') AND name LIKE ? ORDER BY name",
+        ).all(`%${q}%`) || [];
       } catch {}
-      return sendJson(res,{items:videoCatalog(rows),bodyAvailableLocally:false,source:'米游社观测枢'});
+      const all=videoCatalog(rows);
+      const summary=videoCategorySummary(all);
+      const items=cat ? all.filter((x)=>x.category===cat) : all;
+      return sendJson(res,{
+        items,
+        total: items.length,
+        categories: summary.categories,   // [{key,label,count}]
+        allTotal: summary.total,
+        source:'米游社观测枢',
+        fetchable:true,                   // 服务端可按需取回本体 → 可剪辑
+      });
     }
     if(seg[2]==='import' && req.method==='POST'){
       const body=await readBody(req);const file=String(body.path||'');

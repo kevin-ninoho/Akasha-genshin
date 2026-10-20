@@ -14,15 +14,60 @@ export function videoSources(page) {
     }else if(v&&typeof v==='object')for(const x of Object.values(v))walk(x);
   }walk(page);return [...urls];
 }
+/**
+ * 视频内容分类 —— 用来做筛选栏。
+ *
+ * 这些分类不是拍脑袋定的，是对 849 个条目 / 995 个视频按名称实测统计出来的：
+ *   过场动画 405 · 拾枝杂谈 84 · 角色演示 69 · 角色PV 63
+ *   版本PV 59 · 剧情PV 40 · 角色预告 36 · 其他 93
+ * 顺序即优先级：「拾枝杂谈」里也可能出现「角色」字样，所以窄的规则要排前面。
+ * 返回的 key 直接当筛选栏的 id 用，label 是给人的中文名。
+ */
+export const VIDEO_CATEGORIES = [
+  ['shuzhi', '拾枝杂谈', /拾枝杂谈/],
+  ['character-demo', '角色演示', /角色演示/],
+  ['character-pv', '角色PV', /角色PV|角色 ?PV/i],
+  ['character-teaser', '角色预告', /角色预告/],
+  ['version-pv', '版本PV', /版本PV|版本 ?PV|前瞻/],
+  ['story-pv', '剧情PV', /剧情PV|剧情/],
+  ['cutscene', '过场动画', null],   // 走 kind 判定，见下
+  ['other', '其他', null],          // 兜底
+];
+
+/** 给一个视频条目定分类。cutscene 按 kind 判，其余按名称。 */
+export function videoCategoryOf(name, kind) {
+  const s = String(name || '');
+  for (const [key, , re] of VIDEO_CATEGORIES) {
+    if (re && re.test(s)) return key;
+  }
+  if (String(kind || '') === 'cutscene' || /过场|动画/.test(s)) return 'cutscene';
+  return 'other';
+}
+
 // Turn local OBC rows into a bounded, body-free catalogue. Source URLs are
 // inspected only to count indexed video records and are never returned.
+//
+// ⚠ 这里的 availability **不再**标 metadata-only：服务端能按需从官方图床
+// 取回本体（MediaJobs 的 download()），所以这些都是**可以剪辑**的。
 export function videoCatalog(rows) {
   const items=[];
   for(const row of rows||[]){
     let page;try{page=JSON.parse(row.raw_json)}catch{continue}
-    videoSources(page).forEach((_,videoIndex)=>items.push({entryId:Number(row.id),videoIndex,title:String(row.name||'视频资料'),kind:String(row.kind||''),source:'米游社观测枢',availability:'metadata-only'}));
+    const kind=String(row.kind||'');
+    const category=videoCategoryOf(row.name,kind);
+    videoSources(page).forEach((_,videoIndex)=>items.push({entryId:Number(row.id),videoIndex,title:String(row.name||'视频资料'),kind,category,source:'米游社观测枢'}));
   }
-  return items.slice(0,100);
+  return items;
+}
+
+/** 筛选栏要显示的分类和数量（只统计有内容的类）。 */
+export function videoCategorySummary(items) {
+  const counts = new Map();
+  for (const it of items || []) counts.set(it.category, (counts.get(it.category) || 0) + 1);
+  const out = VIDEO_CATEGORIES
+    .filter(([key]) => counts.has(key))
+    .map(([key, label]) => ({ key, label, count: counts.get(key) }));
+  return { total: (items || []).length, categories: out };
 }
 const digest=s=>crypto.createHash('sha256').update(s).digest('hex').slice(0,24);
 export function sceneBoundaries(cuts,duration){

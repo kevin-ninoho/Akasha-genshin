@@ -27,3 +27,17 @@ html[data-theme=light]{--bg:#eeeade;--bg-2:#e6e2d5;--panel:#f8f5ec;--panel-2:#e9
 .library-row{display:flex;align-items:center;gap:8px;margin:0 0 10px}
 .library-row .library-video{margin:0;flex:1;min-width:0}
 .library-row .wb-button{flex:none}
+/* ─── PV：观测枢视频筛选栏 ──────────────────────────────────────────
+   8 个分类 chip（全部 / 角色PV / 角色演示 / 角色预告 / 版本PV /
+   剧情PV / 过场动画 / 拾枝杂谈 / 其他），数量由服务端统计。 */
+.filter-bar{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 10px}
+.filter-chip{
+  display:inline-flex;align-items:center;gap:7px;
+  border:1px solid var(--border);background:var(--bg);color:var(--muted);
+  border-radius:16px;padding:6px 14px;font-size:12px;min-height:32px;
+  transition:border-color .15s,background .15s,color .15s;
+}
+.filter-chip:hover{border-color:var(--accent);color:var(--text)}
+.filter-chip.on{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:600}
+.filter-chip span{font-size:10px;opacity:.72;font-variant-numeric:tabular-nums}
+.filter-chip.on span{opacity:.85}

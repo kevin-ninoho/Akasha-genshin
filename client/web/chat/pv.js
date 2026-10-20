@@ -4,7 +4,13 @@
       const { esc, field, button, heading, S, save, flash, isCurrent }=ui;
       data.clips ||= []; data.jobs ||= []; data.references ||= [];
       host.innerHTML=heading('CREATE / FRAME','PV 创作','观测枢 PV 直接选段导出 · 也可用本机视频',button('＋ 添加本地视频','import-video','primary'))+
-        `<section class="wb-panel"><h3>观测枢 PV</h3><p class="wb-callout">米游社观测枢的 PV / 角色演示 / 过场动画可以直接选中「剪辑这段」：服务端会按需从官方图床取回本体，建好镜头索引，然后在下面的镜头工作台里按秒选段导出。</p><div class="search-row"><input id="catalog-search" placeholder="搜索角色或视频标题（如「胡桃」「钟离」）" aria-label="搜索观测枢视频">${button('搜索','search-catalog')}</div><div id="catalog-library"></div><div id="pv-references"></div></section>
+        `<section class="wb-panel"><h3>观测枢 PV</h3><p class="wb-callout">米游社观测枢的 PV / 角色演示 / 过场动画可以直接选中「剪辑这段」：服务端会按需从官方图床取回本体，建好镜头索引，然后在下面的镜头工作台里按秒选段导出。</p>
+        <div class="search-row"><input id="catalog-search" placeholder="搜索角色或视频标题（如「胡桃」「钟离」）" aria-label="搜索观测枢视频">${button('搜索','search-catalog')}</div>
+        <div id="catalog-filters" class="filter-bar"></div>
+        <div id="catalog-count" class="wb-hits-meta"></div>
+        <div id="catalog-library"></div>
+        <div id="catalog-more"></div>
+        <div id="pv-references"></div></section>
         <section class="wb-panel"><h3>本机剪辑素材</h3><p>自己导入的本地视频。同样可以建镜头索引、预览和导出；单段最长 60 秒。</p><div class="search-row"><input id="video-search" placeholder="搜索本地素材标题" aria-label="搜索本地素材">${button('搜索','search-video')}</div><div id="video-library"></div></section>
         <section class="wb-panel"><div class="section-heading"><h3 id="pv-source-title">镜头工作台</h3><span id="pv-stage" class="muted"></span></div><div id="pv-scenes"><p class="wb-empty">从上面选一份视频（观测枢或本机），建立镜头索引。</p></div>
         <div id="pv-range" hidden><div class="form-row">${field('开始（秒）','start',0,'number')}${field('结束（秒）','end',8,'number')}${button('加入片段清单','add-clip')}${button('生成预览 / 导出','export-clip','primary')}</div><p class="wb-hint">点场景缩略图可以选起点、再点一次选终点；也可以直接填秒数。</p></div><div id="pv-preview"></div></section>
@@ -14,14 +20,54 @@
       function references(){
         host.querySelector('#pv-references').innerHTML=data.references.map((r,i)=>`<div class="recent-row"><span>◇</span><span><b>${esc(r.title)}</b><small>米游社观测枢 · 元数据索引 #${r.entryId}:${r.videoIndex} · 本体不在本地</small><div class="form-row"><label class="wb-field">时间点（秒）<input type="number" min="0" step="0.1" data-reference-time="${i}" value="${esc(r.time??'')}"></label><label class="wb-field">策划备注<input data-reference-note="${i}" value="${esc(r.note||'')}" placeholder="记录希望呈现的内容"></label></div></span><button class="wb-button" data-delete-reference="${i}">移除</button></div>`).join('')||'<p class="wb-empty">加入的观测枢视频元数据会保存在当前 PV 项目中。</p>';
       }
-      async function catalog(){
-        try{const q=host.querySelector('#catalog-search').value;const j=await S.api('/v1/videos/catalog?q='+encodeURIComponent(q));if(!isCurrent())return;
-          // 每条结果两个动作：
-          //   ▷ 剪辑这段 —— 直接设为剪辑源并建镜头索引（服务端会去官方图床取本体）
-          //   ＋ 加入策划 —— 只记一条策划清单，不占用剪辑器
-          host.querySelector('#catalog-library').innerHTML=j.items.map(s=>`<div class="library-row"><button class="library-video" data-clip="${esc(JSON.stringify(s))}"><span>▷</span>${esc(s.title)} <small>剪辑这段</small></button><button class="wb-button" data-catalog="${esc(JSON.stringify(s))}">加入策划</button></div>`).join('')||'<p class="wb-empty">没有匹配的视频。换个角色名试试（例如「胡桃」「钟离」）。</p>';
-        }catch(e){if(isCurrent())host.querySelector('#catalog-library').textContent='观测枢视频暂不可用：'+(e.message||'');}
+      // ── 观测枢视频目录：筛选栏 + 分批渲染 ───────────────────────────
+      // 全库 849 个条目展开成 995 个视频。一次全画出来在客户端会明显卡，
+      // 所以按 60 条一批渲染，底部给「显示更多」。筛选栏的分类和数量由服务端给，
+      // 客户端不自己猜规则（名称里的「角色」字样会同时命中好几类）。
+      const PAGE = 60;
+      let catFilter = data.catFilter || '';   // '' = 全部
+      let catAll = [];                        // 当前查询条件下的全部结果
+      let catShown = PAGE;                    // 已经画了多少条
+      let catSeq = 0;                         // 防竞态：只接受最后一次请求的结果
+
+      function chipBar(categories, allTotal) {
+        const chips = [{ key: '', label: '全部', count: allTotal }, ...(categories || [])];
+        host.querySelector('#catalog-filters').innerHTML = chips.map((c) => {
+          const on = String(c.key) === String(catFilter);
+          return `<button class="filter-chip${on ? ' on' : ''}" data-category="${esc(c.key)}">${esc(c.label)}<span>${c.count}</span></button>`;
+        }).join('');
       }
+
+      function paintCatalog() {
+        const slice = catAll.slice(0, catShown);
+        host.querySelector('#catalog-library').innerHTML = slice.map((s) => `<div class="library-row"><button class="library-video" data-clip="${esc(JSON.stringify(s))}"><span>▷</span>${esc(s.title)} <small>剪辑这段</small></button><button class="wb-button" data-catalog="${esc(JSON.stringify(s))}">加入策划</button></div>`).join('')
+          || `<p class="wb-empty">${catFilter || host.querySelector('#catalog-search').value ? '这个条件下没有匹配的视频。' : '目录加载中…'}</p>`;
+        const rest = catAll.length - slice.length;
+        host.querySelector('#catalog-more').innerHTML = rest > 0
+          ? `<button class="wb-button" data-action="catalog-more">显示更多（还有 ${rest} 条）</button>`
+          : '';
+        const label = (host.querySelector('#catalog-search').value.trim() || catFilter)
+          ? `匹配 ${catAll.length} 条` : `共 ${catAll.length} 条`;
+        host.querySelector('#catalog-count').textContent = catAll.length
+          ? `${label}${catAll.length > slice.length ? `，已显示前 ${slice.length} 条` : ''}`
+          : '';
+      }
+
+      async function catalog(reset = true) {
+        const seq = ++catSeq;
+        const q = host.querySelector('#catalog-search').value.trim();
+        if (reset) catShown = PAGE;
+        try {
+          const j = await S.api('/v1/videos/catalog?q=' + encodeURIComponent(q) + '&category=' + encodeURIComponent(catFilter));
+          if (!isCurrent() || seq !== catSeq) return;
+          catAll = j.items || [];
+          chipBar(j.categories, j.allTotal);
+          paintCatalog();
+        } catch (e) {
+          if (isCurrent() && seq === catSeq) host.querySelector('#catalog-library').textContent = '观测枢视频暂不可用：' + (e.message || '');
+        }
+      }
+      data.catFilter = catFilter;
       function clips(){
         host.querySelector('#pv-clips').innerHTML=data.clips.map((c,i)=>`<div class="recent-row"><span>◇</span><span><b>${esc(c.title)}</b><small>${Number(c.start).toFixed(2)} — ${Number(c.end).toFixed(2)} 秒</small></span><button class="wb-button" data-use-clip="${i}">继续编辑</button><button class="wb-button" data-delete-clip="${i}">移除</button></div>`).join('')||'<p class="wb-empty">片段清单会随项目保存。</p>';
       }
@@ -70,6 +116,8 @@
       }
       host.oninput=e=>{if(e.target.name==='title'){data.title=e.target.value;persist();}else if(['start','end'].includes(e.target.name)){data[e.target.name]=Number(e.target.value);persist();}else if(e.target.matches('[data-reference-time]')){data.references[Number(e.target.dataset.referenceTime)].time=e.target.value;persist();}else if(e.target.matches('[data-reference-note]')){data.references[Number(e.target.dataset.referenceNote)].note=e.target.value;persist();}};
       host.onchange=null;
+      // 搜索框里按回车直接查 —— 搜索按钮不是唯一入口
+      host.onkeydown=(e)=>{ if(e.key==='Enter' && e.target.id==='catalog-search'){ e.preventDefault(); catalog(); } };
       host.onclick=async e=>{
         try{
           const action=e.target.closest('[data-action]')?.dataset.action,src=e.target.closest('[data-source]'),scene=e.target.closest('[data-scene]');
@@ -79,6 +127,10 @@
           }
           if(action==='search-video')await library();
           if(action==='search-catalog')await catalog();
+          if(action==='catalog-more'){catShown+=PAGE;paintCatalog();return;}
+          // 筛选栏：切分类立即重查（保留搜索词），并把选择写进项目里
+          const chip=e.target.closest('[data-category]');
+          if(chip){catFilter=chip.dataset.category||'';data.catFilter=catFilter;await catalog();await persist();return;}
           const metadata=e.target.closest('[data-catalog]');
           if(metadata){const item=JSON.parse(metadata.dataset.catalog);if(!data.references.some(r=>r.entryId===item.entryId&&r.videoIndex===item.videoIndex))data.references.unshift({...item,time:'',note:''});references();await persist();}
           // 「剪辑这段」：观测枢条目直接当剪辑源。
