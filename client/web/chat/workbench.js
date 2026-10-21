@@ -133,13 +133,17 @@
       <p class="muted">游戏适配：原神已接入；其他游戏待配置适配器后才会出现。</p></section>`;
     document.getElementById('font-size').value = String(p.fontSize || 14);
     host().onchange = async () => {
-      const next = { fontSize: Number(document.getElementById('font-size').value), reduceMotion: document.getElementById('reduce-motion').checked };
-      applyAppearance(next); try { await S.put('preferences', 'appearance', next); } catch { /* visible store error */ }
+      const current = S.peek('preferences', 'appearance', p);
+      const next = { ...current, fontSize: Number(document.getElementById('font-size').value), reduceMotion: document.getElementById('reduce-motion').checked };
+      applyAppearance(next);
+      try { await S.put('preferences', 'appearance', next); }
+      catch (error) { flash(`偏好没有保存：${error.message}`); }
     };
   }
   function applyAppearance(p) {
     document.documentElement.style.setProperty('--reading-size', (p.fontSize || 14) + 'px');
     document.documentElement.classList.toggle('reduce-motion', !!p.reduceMotion);
+    window.AkashaWallpapers?.apply(p.wallpaper);
   }
   document.addEventListener('click', async e => {
     const nav = e.target.closest('[data-nav]');
@@ -158,7 +162,7 @@
     async init() {
       document.getElementById('save-state').onclick = () => S.retry().catch(e => flash(e.message));
       document.getElementById('close-evidence').onclick = () => { document.getElementById('evidence-drawer').hidden = true; document.getElementById('main').focus(); };
-      document.addEventListener('keydown', e => { if(e.key === 'Escape') document.getElementById('close-evidence').click(); });
+      document.addEventListener('keydown', e => { if(e.key === 'Escape' && !document.getElementById('evidence-drawer').hidden) document.getElementById('close-evidence').click(); });
       applyAppearance(await S.get('preferences', 'appearance', {}));
       await go('home');
     },

@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 
 export function scanTree(root, { dependencyTree = false } = {}) {
   const findings = [], files = [];
+  // Explicitly approved UI art for the local client package. Keep the allowlist
+  // narrow: KB assets and every other binary remain blocked by the checks below.
+  const approvedClientVisuals = new Map(['venti', 'zhongli', 'raiden', 'nahida', 'focalors', 'mavuika', 'tsaritsa'].map(name => [`client/web/chat/assets/archons/${name}.webp`, 'webp']));
   const excluded = new Set(['.git', 'node_modules', 'dist', 'out', 'outputs', 'release', 'temp', 'cache', 'logs', 'work', 'test-results', 'userData']);
   const patterns = [
     ['key', /\bsk-[A-Za-z0-9_-]{12,}/],
@@ -20,9 +23,19 @@ export function scanTree(root, { dependencyTree = false } = {}) {
       if (entry.isDirectory()) { if (!excluded.has(entry.name)) visit(file); continue; }
       if (!entry.isFile()) continue;
       const stat = fs.statSync(file); files.push({ file: rel, bytes: stat.size });
-      if (/\.(?:sqlite(?:3)?(?:-wal|-shm)?|db(?:-wal|-shm)?|mp4|mp3|wav|ogg|aac|webm|mov|mkv|png|jpe?g|webp|gif|ico|pfx|pem|p12|key|exe|zip)$/i.test(entry.name)) findings.push({ file: rel, rule: 'data-or-binary' });
+      const approvedFormat = approvedClientVisuals.get(rel);
+      const approvedVisual = !!approvedFormat;
+      if (approvedVisual) {
+        const signature = Buffer.alloc(12);
+        const fd = fs.openSync(file, 'r');
+        try { fs.readSync(fd, signature, 0, signature.length, 0); } finally { fs.closeSync(fd); }
+        const valid = approvedFormat === 'webp' && signature.toString('ascii', 0, 4) === 'RIFF' && signature.toString('ascii', 8, 12) === 'WEBP';
+        if (stat.size > 2 * 1024 * 1024 || !valid) findings.push({ file: rel, rule: 'approved-visual-invalid' });
+      }
+      if (!approvedVisual && /\.(?:sqlite(?:3)?(?:-wal|-shm)?|db(?:-wal|-shm)?|mp4|mp3|wav|ogg|aac|webm|mov|mkv|png|jpe?g|webp|gif|ico|pfx|pem|p12|key|exe|zip)$/i.test(entry.name)) findings.push({ file: rel, rule: 'data-or-binary' });
       if (/^(?:data|data-src|assets|media-cache|videos|clips|thumbnails)\//.test(rel) && !/\.(?:gitkeep|md)$/.test(entry.name)) findings.push({ file: rel, rule: 'corpus-directory' });
       if (/^(?:llm\.config|config|resolved|build-defaults(?:\.client)?)\.json$/.test(entry.name)) findings.push({ file: rel, rule: 'private-config' });
+      if (approvedVisual) continue;
       if (stat.size > 2 * 1024 * 1024) { findings.push({ file: rel, rule: 'large-file' }); continue; }
       const buffer = fs.readFileSync(file);
       if (buffer.subarray(0, 16).toString().startsWith('SQLite format 3')) findings.push({ file: rel, rule: 'sqlite-magic' });

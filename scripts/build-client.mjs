@@ -15,6 +15,33 @@ const repo = String(process.env.AKASHA_GITHUB_REPO || '').trim();
 if ((owner || repo) && (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(owner) || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(repo))) throw Error('Set valid AKASHA_GITHUB_OWNER and AKASHA_GITHUB_REPO together.');
 const scan = scanTree(root);
 if (scan.findings.length) { console.error(JSON.stringify(scan.findings)); process.exit(1); }
+const privateDefaultsSource = String(process.env.AKASHA_BUILD_DEFAULTS_FILE || '').trim();
+const privateDefaultsTarget = path.join(client, 'desktop', 'build-defaults.client.json');
+if (fs.existsSync(privateDefaultsTarget)) throw Error('Refusing to build while a stale local service profile exists. Remove client/desktop/build-defaults.client.json first.');
+let generatedDefaults = false;
+if (privateDefaultsSource) {
+  const raw = JSON.parse(fs.readFileSync(path.resolve(privateDefaultsSource), 'utf8'));
+  const defaults = {};
+  if (typeof raw.kbRemoteV1 === 'string' && raw.kbRemoteV1.trim()) defaults.kbRemoteV1 = raw.kbRemoteV1.trim();
+  const fallbacks = Array.isArray(raw.kbRemoteV1Fallbacks) ? raw.kbRemoteV1Fallbacks : [];
+  // Public builds must not inherit machine-only hostnames from the owner's
+  // local profile. Keep only distinct HTTPS failovers; the primary may remain
+  // HTTP for compatibility with the already-deployed endpoint.
+  const primaryHost = new URL(defaults.kbRemoteV1).hostname;
+  defaults.kbRemoteV1Fallbacks = fallbacks.filter(value => {
+    if (typeof value !== 'string' || !value.trim()) return false;
+    try { const url = new URL(value.trim()); return url.protocol === 'https:' && url.hostname !== primaryHost; }
+    catch { return false; }
+  }).map(value => value.trim());
+  if (typeof raw.kbToken === 'string' && raw.kbToken.trim()) defaults.kbToken = raw.kbToken.trim();
+  if (!defaults.kbRemoteV1 || !defaults.kbToken) throw Error('The local service profile must provide kbRemoteV1 and kbToken.');
+  for (const value of [defaults.kbRemoteV1, ...defaults.kbRemoteV1Fallbacks]) {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Error('Invalid cloud service URL in local profile.');
+  }
+  fs.writeFileSync(privateDefaultsTarget, JSON.stringify(defaults, null, 2) + '\n', { flag: 'wx' });
+  generatedDefaults = true;
+}
 const metadataPath = path.join(root, 'package.json');
 const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); metadata.version = version;
 fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2) + '\n');
@@ -34,11 +61,16 @@ if (process.env.AKASHA_BUILD_COMPRESSION) {
 const env = { ...process.env };
 // Building must never contact a release API, even if publishing credentials exist in the caller's shell.
 delete env.GH_TOKEN; delete env.GITHUB_TOKEN;
-const code = await new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, args, { cwd: client, stdio: 'inherit', env, windowsHide: true });
-  child.on('error', reject); child.on('exit', result => resolve(result ?? 1));
-});
-if (code) process.exit(code);
+let code;
+try {
+  code = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { cwd: client, stdio: 'inherit', env, windowsHide: true });
+    child.on('error', reject); child.on('exit', result => resolve(result ?? 1));
+  });
+} finally {
+  if (generatedDefaults) fs.rmSync(privateDefaultsTarget, { force: true });
+}
+if (code) throw Error(`electron-builder exited with status ${code}`);
 const installer = `Akasha-${version}-x64-setup.exe`;
 const bytes = fs.readFileSync(path.join(output, installer));
 if (!fs.existsSync(path.join(output, installer + '.blockmap'))) throw Error('The NSIS blockmap was not generated.');

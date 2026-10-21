@@ -701,20 +701,6 @@ body {
 *::-webkit-scrollbar-thumb { background: rgba(211, 188, 142, .3); border-radius: 999px; }
 *::-webkit-scrollbar-thumb:hover { background: rgba(211, 188, 142, .5); }
 
-/* 角色立绘墙：空状态里摆一排七神头像，点一下直接问 */
-.archon-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 6px; }
-.archon-row button {
-  width: 62px; padding: 0; background: none; border: 0; cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 5px;
-}
-.archon-row img {
-  width: 54px; height: 54px; border-radius: 50%; object-fit: cover; object-position: top;
-  border: 2px solid rgba(211, 188, 142, .45);
-  background: var(--panel-2);
-  transition: transform .18s var(--ease), border-color .18s var(--ease);
-}
-.archon-row button:hover img { transform: translateY(-3px) scale(1.06); border-color: var(--gold-hi); }
-.archon-row span { font-size: 11px; color: var(--muted); }
 /* 表格里的条目缩略图（武器推荐 / 圣遗物推荐）。
    用户要的是「武器信息 + 武器图片」，只有一串名字不够 ——
    但表格行高有限，所以图做成行内小方块，和文字基线对齐。 */

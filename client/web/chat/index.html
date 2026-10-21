@@ -48,6 +48,10 @@
              客户端不得以任何形式直接访问知识库全部内容，界面上就不该出现这种按钮。
              自己要翻库用浏览器开 http://127.0.0.1:5178。 -->
         <button class="icon" id="reset" title="清空本会话的服务端上下文">↺</button>
+        <div class="wallpaper-control" id="wallpaper-control">
+          <button class="icon wallpaper-trigger" id="wallpaper-picker" title="选择七神元素背景" aria-label="选择七神元素背景" aria-controls="wallpaper-menu" aria-expanded="false">✧<span>背景</span></button>
+          <div class="wallpaper-menu" id="wallpaper-menu" role="group" aria-label="七神元素背景" hidden></div>
+        </div>
         <!-- 明暗切换。默认跟系统走，点了就记住选择。 -->
         <button class="icon" id="theme" title="切换深色 / 浅色" aria-label="切换主题" aria-pressed="false">🌙</button>
       </header>
@@ -98,7 +102,8 @@
   <script src="/skills.js"></script>
   <script src="/planner.js"></script>
   <link rel="stylesheet" href="/workbench.css">
-  <script src="/workspace.js"></script><script src="/workbench.js"></script>
+  <link rel="stylesheet" href="/gallery.css">
+  <script src="/workspace.js"></script><script src="/wallpapers.js"></script><script src="/workbench.js"></script>
   <script src="/research.js"></script><script src="/growth.js"></script><script src="/pv.js"></script>
   <script src="/app.js"></script>
 </body>

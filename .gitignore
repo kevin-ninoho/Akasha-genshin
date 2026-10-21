@@ -71,8 +71,15 @@ cache/
 *.blockmap
 latest.yml
 test-results/
+.playwright-cli/
 outputs/
 work/
+
+# Explicit UI artwork; source and character attribution are in ASSET_CREDITS.md.
+!client/web/chat/assets/
+!client/web/chat/assets/*.svg
+!client/web/chat/assets/archons/
+!client/web/chat/assets/archons/*.webp
 
 # Editor and OS files
 .DS_Store

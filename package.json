@@ -1,7 +1,7 @@
 {
   "name": "akasha",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.5.10",
   "description": "Akasha open-source desktop client and knowledge-base engine",
   "type": "module",
   "engines": {

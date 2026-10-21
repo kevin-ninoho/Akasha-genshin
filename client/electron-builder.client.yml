@@ -9,7 +9,6 @@ files:
   - desktop/**/*
   - '!desktop/build/**'
   - '!desktop/build-defaults.json'
-  - '!desktop/build-defaults.client.json'
   - '!**/*.map'
 extraResources:
   - from: ../LICENSE
@@ -19,7 +18,7 @@ extraResources:
     filter: ['**/*.mjs']
   - from: web/chat
     to: web/chat
-    filter: ['*.html', '*.js', '*.css']
+    filter: ['*.html', '*.js', '*.css', 'ASSET_CREDITS.md', 'assets/archons/*.webp']
   - from: ../engine
     to: engine
     filter: ['**/*.mjs', '**/*.example.json', '!data/**', '!assets/**', '!cache/**', '!logs/**', '!**/llm.config.json']

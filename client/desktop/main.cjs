@@ -29,9 +29,20 @@ function applicationVersion() {
 // 开发时：就是 gen-suite 自己。
 const RESOURCES = IS_PACKAGED ? process.resourcesPath : path.join(DESKTOP, '..');
 
-// Runtime data and secrets are user-provided; no bundled service defaults.
+// Release builds may include an explicit cloud-service profile. The profile is
+// generated locally at build time and ignored by Git; source builds stay empty.
 let buildDefaultsFrom = '';
-const BUILD_DEFAULTS = Object.freeze({});
+const BUILD_DEFAULTS = (() => {
+  try {
+    const f = path.join(DESKTOP, 'build-defaults.client.json');
+    const value = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      buildDefaultsFrom = 'build-defaults.client.json';
+      return Object.freeze(value);
+    }
+  } catch { /* Public/source build: no packaged cloud profile. */ }
+  return Object.freeze({});
+})();
 let config = { kbDir: '', dataDir: process.env.KB_DATA_DIR || '', videoIndexPath: process.env.KB_VIDEO_INDEX_PATH || '', voiceAudioDir: '' };
 let configFile = '';
 let kbSource = '';          // '配置' | '包内' | '已释放到用户目录'

@@ -499,7 +499,6 @@
       // 早先写「检索知识库作答」—— 那是把它当搜索框。它的价值在
       // 「把散落在官方原典里的东西变成能直接用的结论」，且**每条可回溯**。
       '<p>二游垂直 AI 工作台 · 事实取自官方原典，结论逐条可回溯</p>' +
-      '<div class="archon-row" id="archon-row"></div>' +
       '<div class="starters">' + STARTERS.map(function (s) {
         return '<button class="starter" data-say="' + esc(s) + '">' + esc(s) + '</button>';
       }).join('') + '</div></div>' +
@@ -507,38 +506,6 @@
       // 左侧「技能」已经是一级导航，再在首屏铺十几个 chip 是重复且拥挤的，
       // 用户会自己点。首屏只留最能让人开口的那几个例子。
       '';
-  }
-
-  /**
-   * 空状态那排角色头像。
-   *
-   * 形象走 /v1/asset 取知识库自己的立绘 —— 客户端不需要另带图片资源。
-   * 摆最近实装的 8 个，点一下直接问「XXX是谁」。
-   * 拿不到就静默收掉：这只是装饰，不该因为它失败让空状态报错。
-   */
-  var archonRowLoaded = false;
-  function loadArchonRow() { return;
-    if (archonRowLoaded) return;
-    // 还没渲染到空状态就先不加载，等下次（别把标记置上，否则永远不加载了）
-    if (!document.getElementById('archon-row')) return;
-    archonRowLoaded = true;
-    fetch('/v1/query?domain=character&sort=release_desc&limit=8')
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) {
-        // ⚠ 必须在 then 里**重新取元素**，不能用 fetch 之前的引用：
-        //   这段请求是异步的，期间 renderLog() 很可能已经重画过一遍，
-        //   事先抓的那个节点已经脱离文档 —— 往它写 innerHTML 不会有任何效果
-        //   （表现就是"代码跑了、没报错、但界面上什么都没有"）。
-        var box = document.getElementById('archon-row');
-        if (!box) return;
-        if (!j || !j.items || !j.items.length) { box.style.display = 'none'; return; }
-        box.innerHTML = j.items.map(function (c) {
-          return '<button type="button" data-say="' + esc(c.name + '是谁') + '" title="' + esc(c.name) + '">' +
-            '<img src="/v1/asset/character/' + c.id + '?size=icon" alt="' + esc(c.name) + '" loading="lazy">' +
-            '<span>' + esc(c.name) + '</span></button>';
-        }).join('');
-      })
-      .catch(function () { /* 装饰而已，失败就算了 */ });
   }
 
   var modelCache = '';
@@ -616,7 +583,6 @@
     els.title.textContent = c ? c.title : '新对话';
     if (!c || !c.messages.length) {
       els.log.innerHTML = emptyHtml();
-      loadArchonRow();
       state.botEl = null;
       return;
     }

@@ -12,7 +12,7 @@
         <section class="wb-panel"><div class="section-heading"><h3>材料缺口与每日行动</h3><span class="muted">库存与勾选进度自动保存</span></div><div id="materials-table"></div></section>`;
       const persist=()=>save(data).catch(e=>flash(e.message));
       function roster(){
-        host.querySelector('#roster-editor').innerHTML=data.roster.map((c,i)=>`<div class="roster-row"><strong>${esc(c.name)}</strong><label>当前等级 <input data-level="${i}" type="number" min="1" max="90" value="${c.level}"></label><button class="wb-button" data-remove="${i}" aria-label="移除 ${esc(c.name)}">×</button></div>`).join('')||'<p class="wb-empty">搜索并加入你想培养的角色。</p>';
+        host.querySelector('#roster-editor').innerHTML=data.roster.map((c,i)=>`<div class="roster-row">${c.charId!=null?`<img class="roster-portrait" src="/v1/asset/character/${encodeURIComponent(c.charId)}?size=display" alt="${esc(c.name)}立绘" loading="lazy" decoding="async">`:'<span class="roster-portrait-placeholder" aria-hidden="true">✧</span>'}<div class="roster-details"><strong>${esc(c.name)}</strong><label>当前等级 <input data-level="${i}" type="number" min="1" max="90" value="${c.level}"></label></div><button class="wb-button" data-remove="${i}" aria-label="移除 ${esc(c.name)}">×</button></div>`).join('')||'<p class="wb-empty">搜索并加入你想培养的角色。</p>';
       }
       function result(){
         const r=data.result;
@@ -43,7 +43,7 @@
           if(action==='search-character'){
             const q=host.querySelector('#character-search').value.trim();if(!q)return;
             const j=await S.api('/v1/query?domain=character&limit=12&q='+encodeURIComponent(q));if(!isCurrent())return;
-            host.querySelector('#character-results').innerHTML=(j.items||[]).map(c=>`<button class="wb-button" data-add-character="${esc(JSON.stringify({id:c.id,name:c.name}))}">＋ ${esc(c.name)}</button>`).join('')||'<p>没有找到角色，请检查名称或资料库。</p>';
+            host.querySelector('#character-results').innerHTML=(j.items||[]).map(c=>`<button class="character-choice" data-add-character="${esc(JSON.stringify({id:c.id,name:c.name}))}"><img src="/v1/asset/character/${encodeURIComponent(c.id)}?size=display" alt="" loading="lazy" decoding="async"><span>＋ ${esc(c.name)}</span></button>`).join('')||'<p>没有找到角色，请检查名称或资料库。</p>';
           }
           if(action==='calculate'){
             const b=e.target.closest('button');b.disabled=true;flash('正在按本机资料计算…');
