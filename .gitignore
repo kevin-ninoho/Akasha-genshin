@@ -84,3 +84,6 @@ work/
 # Editor and OS files
 .DS_Store
 Thumbs.db
+
+# 本地临时备份（同步多树时留的）
+*.bak-*
