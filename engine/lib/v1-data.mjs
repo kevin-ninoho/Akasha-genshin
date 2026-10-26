@@ -24,6 +24,30 @@ import { corpusRevision } from './corpus-revision.mjs';
 // 写 'genshin' 会让 characters / books 全部查空。
 const GID = 1;
 
+/**
+ * 星铁图鉴的域（game_id=2）。
+ *
+ * 这些是 serve-client / resolveArt 认识的名字，和 game_entries.domain 一一对应。
+ * 星铁没有观测枢词条库，所以这里跟 V1_DOMAINS（原神那套）是两套清单。
+ */
+export const SR_DOMAINS = [
+  'light_cone', 'relic', 'relic_set', 'item', 'achievement',
+  'simulated_event', 'simulated_blessing', 'simulated_curio',
+  'element', 'path',
+];
+
+/** 星铁侧 /v1 暴露的域清单（不带剧情/语音，因为没有语料）。 */
+export const SR_V1_DOMAINS = [
+  { domain: 'character', label: '角色', source: '星铁官方数据（客户端解包）', filterable: ['element', 'weapon', 'rarity'] },
+  { domain: 'light_cone', label: '光锥', source: '星铁官方数据（客户端解包）', filterable: ['rarity', 'path'] },
+  { domain: 'relic', label: '遗器', source: '星铁官方数据（客户端解包）', filterable: ['rarity', 'kind'] },
+  { domain: 'item', label: '材料道具', source: '星铁官方数据（客户端解包）', filterable: [] },
+  { domain: 'achievement', label: '成就', source: '星铁官方数据（客户端解包）', filterable: [] },
+  { domain: 'simulated_event', label: '模拟宇宙事件', source: '星铁官方数据（客户端解包）', filterable: [] },
+  { domain: 'simulated_blessing', label: '模拟宇宙祝福', source: '星铁官方数据（客户端解包）', filterable: ['rarity', 'path'] },
+  { domain: 'simulated_curio', label: '模拟宇宙奇物', source: '星铁官方数据（客户端解包）', filterable: ['rarity'] },
+];
+
 /** /v1 对外暴露的知识域清单（客户端用来做覆盖自检与能力发现）。 */
 export const V1_DOMAINS = [
   { domain: 'character', label: '角色', source: '米游社观测枢', filterable: ['element', 'weapon', 'rarity', 'region', 'faction'] },
@@ -55,43 +79,17 @@ export function voiceGroupOf(name) {
 /** 分组顺序：按 VOICE_GROUPS 的声明序，落不进任何规则的归「其他」。 */
 export const VOICE_GROUP_ORDER = [...VOICE_GROUPS.map(([, label]) => label), '其他'];
 
-export function openV1(dataDir, { writable = true } = {}) {
+export function openV1(dataDir, { writable = true, gameId = 1 } = {}) {
   const db = new DatabaseSync(path.join(dataDir, 'kb.sqlite'), { readOnly: true });
   const ws = openWorkspace(dataDir, { readonly: !writable });
   const obc = openObc(dataDir);
   const q = (sql, ...p) => db.prepare(sql).all(...p);
   const one = (sql, ...p) => db.prepare(sql).get(...p);
 
-  // ---------------------------------------------------------------- 回官方原文
-
-  // 每个域都尽量给出「观测枢原文」链接，让用户能回官方核对，而不是只看我们的转述。
-  //
-  // 为什么值得为四个域各写一条映射：客户端里那枚「原文↗」是按 sourceUrl 渲染的，
-  // 缺了它，用户看到的就是一个点不动的来源标签（此前 book / voice / dialogue /
-  // relation 四个域都是这样，只有 character 和 obc 能跳）。
-  //
-  // 各域的锚定依据（都实测过覆盖率，见下方注释）：
-  //   character → characters.obc_id
-  //   obc       → obc_entries.id 本身
-  //   voice     → 语音挂在角色页的「配音展示」模块下，锚到该角色的词条
-  //   relation  → 关系同样来自角色页，锚到**来源角色**的词条
-  //   dialogue  → dialogue_groups.quest_id 就是观测枢词条 id（3863/3863 有值，
-  //               932/932 在观测枢真实存在，128828 行台词 100% 可挂）
-  //   book      → books.title 精确等于观测枢 kind='book' 词条名（93/93 全中）
-  //
-  // 拿不到就返回空串（obcSourceUrl 对非法 id 返回 ''），客户端会自然不渲染链接 ——
-  // 宁可不给，也不给一个错的官方地址。
-  const obcIdByBookTitle = (() => {
-    let stmt = null;
-    return (title) => {
-      if (!obc) return null;
-      try {
-        if (!stmt) stmt = obc.prepare("SELECT id FROM obc_entries WHERE kind = 'book' AND name = ? LIMIT 1");
-        const r = stmt.get(String(title || ''));
-        return r ? r.id : null;
-      } catch { return null; }
-    };
-  })();
+  // 本实例绑定的游戏。原来这里是模块级常量 1（写死原神），
+  // 改成实例级之后，openV1(dir, {gameId:2}) 就是星铁视图，
+  // 下面所有 SQL 里的 GID 都跟着走（内层声明遮蔽模块级的同名声明的）。
+  const GID = Number(gameId) || 1;
 
   // ---------------------------------------------------------------- 覆盖清单
 
@@ -199,7 +197,13 @@ export function openV1(dataDir, { writable = true } = {}) {
 
     const { clauses, params } = parseWhere(domain, where);
     if (domain !== 'obc' && text) {
-      if (domain === 'character') { clauses.push('name LIKE ?'); params.push(like); }
+      // 角色：除了名字，还要搜**别名**。社区里叫法满天飞（卡芙卡=卡妈、
+      // 艾丝妲=富婆、三月七=看板娘），只匹配 name 会让用户以为库是空的。
+      // 别名在导入时写进了 search_docs 的 text / extra_json，这里用子查询带出来。
+      if (domain === 'character') {
+        clauses.push("(name LIKE ? OR IFNULL(en_name,'') LIKE ? OR IFNULL(pinyin,'') LIKE ? OR id IN (SELECT owner_id FROM search_docs WHERE doc_type='character' AND game_id=? AND text LIKE ?))");
+        params.push(like, like, like, GID, like);
+      }
       else if (domain === 'book') { clauses.push('title LIKE ?'); params.push(like); }
       else if (domain === 'voice') { clauses.push('(name LIKE ? OR text LIKE ?)'); params.push(like, like); }
       else if (domain === 'dialogue') { clauses.push('(chapter LIKE ? OR quest_title LIKE ?)'); params.push(like, like); }
@@ -219,7 +223,7 @@ export function openV1(dataDir, { writable = true } = {}) {
     else if (domain === 'book') items = rows.map((r) => ({
       id: r.id, title: r.title, volumes: r.volume_count, chars: r.char_count,
       url: `/#/book/${r.id}`,
-      // 书籍靠**书名**对齐观测枢的 kind='book' 词条（本地 93 本 ↔ 观测枢 93 条，全中）。
+      // 书籍靠**书名**对齐观测枢 kind='book' 词条（本地 93 本 ↔ 观测枢 93 条，全中）。
       sourceUrl: obcSourceUrl(obcIdByBookTitle(r.title)),
     }));
     else if (domain === 'voice') items = rows.map((r) => voiceItem(r));
@@ -245,17 +249,12 @@ export function openV1(dataDir, { writable = true } = {}) {
       title: r.title || '', identity: r.identity || '', faction: r.faction || '',
       region: r.region || '', constellation: r.constellation || '',
       element: r.element || '', weapon: r.weapon || '', rarity: r.rarity || null,
-      // 观测枢角色页的「定位」，如「爆发型输出角色」。此前因字段名对不上整列丢失。
+      // 观测枢角色页的「定位」。构建器此前读的是语料里不存在的「身份」字段，整列丢失。
       role: r.role || '',
-      // 词条 id 与观测枢原文地址：让用户能回官方核对，而不是只能看我们的转述。
       obcId: r.obc_id || null,
       sourceUrl: obcSourceUrl(r.obc_id),
-      // 档案是否为空壳。两个信号：
-      //   ① 观测枢没有对应角色词条（obcId 为空）—— 这是**源头限制**，
-      //      观测枢只收可玩角色，派蒙/戴因斯雷布/愚人众执行官都没有角色页；
-      //   ② 词条在、但核心字段少得异常。
-      // 客户端据此显示「观测枢未收录其档案，但台词已收录 N 条」，而不是甩一张空表 ——
-      // 空表会让用户以为是我们没做全。
+      // 档案是否为空壳：① 观测枢没有该角色词条（源头限制，派蒙/戴因斯雷布都没有
+      // 独立角色页）；② 词条在但核心字段少得异常。客户端据此如实说明，而不是端空表。
       profileIncomplete: !r.obc_id || filledCore < 4,
       profileFields: filledCore,
       birthday: r.birthday || '', cv: r.cv_cn || '', releaseDate: r.release_date || '',
@@ -268,14 +267,39 @@ export function openV1(dataDir, { writable = true } = {}) {
       url: `/#/character/${r.id}`,
     };
   }
+  // 回官方原文用：按书名查观测枢 kind='book' 词条的 id。
+  //
+  // 为什么需要：客户端那枚「原文↗」是按 sourceUrl 渲染的，缺了它用户看到的就是一个
+  // 点不动的来源标签。此前只有 character / obc 两个域能跳，book / voice / dialogue /
+  // relation 四个域都没有 sourceUrl。
+  //
+  // 各域的锚定依据（覆盖率都实测过）：
+  //   voice     → 语音挂在角色页的「配音展示」模块下，锚到该角色词条（6951/6951）
+  //   relation  → 关系同来自角色页，锚到**来源角色**词条（1234/1234）
+  //   dialogue  → dialogue_groups.quest_id 就是观测枢词条 id（3863/3863 有值，
+  //               932/932 在观测枢真实存在，128828 行台词 100% 可挂）
+  //   book      → books.title 精确等于观测枢 kind='book' 词条名（93/93 全中）
+  //
+  // 拿不到就返回 null，obcSourceUrl 会给出空串，客户端自然不渲染链接 ——
+  // 宁可不给，也不给一个错的官方地址。
+  const obcIdByBookTitle = (() => {
+    let stmt = null;
+    return (title) => {
+      if (!obc) return null;
+      try {
+        if (!stmt) stmt = obc.prepare("SELECT id FROM obc_entries WHERE kind = 'book' AND name = ? LIMIT 1");
+        const r = stmt.get(String(title || ''));
+        return r ? r.id : null;
+      } catch { return null; }
+    };
+  })();
+
   function voiceItem(r) {
     const c = one('SELECT name, obc_id FROM characters WHERE id = ?', r.character_id);
     return {
       id: r.id, characterId: r.character_id, character: c ? c.name : '',
       group: r.grp || '', name: r.name, text: r.text,
       url: `/#/character/${r.character_id}`,
-      // 语音在观测枢是角色页的「配音展示」模块，所以回链指向该角色的词条。
-      // 6951/6951 条语音的角色都有 obc_id，无一遗漏。
       sourceUrl: obcSourceUrl(c && c.obc_id),
     };
   }
@@ -285,10 +309,8 @@ export function openV1(dataDir, { writable = true } = {}) {
       id: r.id, characterId: r.character_id, character: c ? c.name : '',
       questType: r.quest_type || '', chapter: r.chapter || '', questTitle: r.quest_title || '',
       lines: r.line_count, url: `/#/character/${r.character_id}`,
-      // dialogue_groups.quest_id 本身就是观测枢的词条 id（不是名字）。
-      // 这一点很关键：按名字匹配只有 636/1149，因为观测枢的名字带章节前缀
-      // （「春曦画桃符 第三回「…」」），而本地 quest_title 只有内层那段；
-      // 按 id 则是精确的 —— 932/932 个去重 quest_id 都在观测枢真实存在。
+      // quest_id 本身就是观测枢词条 id（不是名字）。按名字匹配只有 636/1149，
+      // 因为观测枢的名字带章节前缀；按 id 则是精确的。
       sourceUrl: obcSourceUrl(r.quest_id),
     };
   }
@@ -297,8 +319,6 @@ export function openV1(dataDir, { writable = true } = {}) {
     return {
       id: r.id, from: s ? s.name : String(r.src_id), fromId: r.src_id,
       to: r.target_name || '', toId: r.target_id, quote: r.quote || '',
-      // 关系条目是角色页里「角色关联语音」的引文，锚到**来源角色**的词条。
-      // 1234/1234 全部可挂。
       sourceUrl: obcSourceUrl(s && s.obc_id),
     };
   }
@@ -342,7 +362,7 @@ export function openV1(dataDir, { writable = true } = {}) {
         sections: q('SELECT ord, title, body FROM book_sections WHERE book_id = ? ORDER BY ord', n)
           .map((s) => ({ title: s.title, body: s.body })),
         url: `/#/book/${r.id}`,
-        // 和列表同样按书名对齐观测枢的 kind='book' 词条
+        // 和列表同样按书名对齐观测枢 kind='book' 词条
         sourceUrl: obcSourceUrl(obcIdByBookTitle(r.title)),
       };
     }
@@ -358,6 +378,23 @@ export function openV1(dataDir, { writable = true } = {}) {
 
   const ASSETS = path.join(dataDir, 'assets');
   function resolveArt(kind, id, size) {
+    // ── 星铁（game_id=2）──────────────────────────────────────────
+    // 星铁的图有两种命名：
+    //   角色        data/assets/sr/{icons,thumbs,display}/<角色id>.png
+    //   其它图鉴    data/assets/sr/icons/<domain>_<条目id>.png
+    // 星铁**没有观测枢**（米哈游只给原神做了），所以走不通下面 obc 那条路。
+    if (kind === 'starrail' || kind === 'sr' || SR_DOMAINS.includes(kind)) {
+      const isChar = kind === 'starrail' || kind === 'sr';
+      const sub = isChar ? (size === 'display' ? 'display' : size === 'thumb' ? 'thumbs' : 'icons') : 'icons';
+      const base = path.resolve(path.join(ASSETS, 'sr', sub));
+      const stem = isChar ? String(id) : `${kind}_${id}`;
+      for (const ext of ['png', 'webp', 'jpg']) {
+        const f = path.resolve(path.join(base, `${stem}.${ext}`));
+        if (!f.startsWith(base)) return null;   // 目录穿越防护
+        if (fs.existsSync(f)) return f;
+      }
+      return null;
+    }
     // 观测枢条目（武器 / 圣遗物 / 敌人 / 书籍…）的图**不在原来的素材库里**。
     // obc_entries.icon 存的是米哈游 CDN 的 URL（act-upload.mihoyo.com、
     // uploadstatic.mihoyo.com —— 都是官方域名）。
@@ -382,6 +419,18 @@ export function openV1(dataDir, { writable = true } = {}) {
     if (!r) return null;
     if (size === 'display' || size === 'thumb') { if (!r.has_full_art) return null; }
     else if (!r.has_icon) return null;
+    // 星铁（game_id=2）的图按 **数字 id** 命名，落在 data/assets/sr/<sub>/<id>.png；
+    // 原神按**中文名**命名（URL 编码），落在 data/assets/<sub>/<name>.webp。
+    // 两套命名不能混用，所以这里按 GID 分叉。
+    if (GID === 2) {
+      const base = path.resolve(path.join(ASSETS, 'sr', sub));
+      for (const ext of ['png', 'webp', 'jpg']) {
+        const f = path.resolve(path.join(base, `${n}.${ext}`));
+        if (!f.startsWith(base)) return null;
+        if (fs.existsSync(f)) return f;
+      }
+      return null;
+    }
     // 落盘文件名是 URL 编码过的（data/assets/icons/%E4%B8%83%E4%B8%83.webp），
     // 直接用中文名拼路径会 404。
     const file = path.join(ASSETS, sub, `${encodeURIComponent(r.name)}.webp`);
@@ -415,6 +464,8 @@ export function openV1(dataDir, { writable = true } = {}) {
     const list = [];
     for (const x of q('SELECT name FROM characters WHERE game_id = ?', GID)) list.push({ kind: 'character', domain: 'character', name: x.name });
     for (const x of q('SELECT title FROM books WHERE game_id = ?', GID)) list.push({ kind: 'book', domain: 'book', name: x.title });
+    // 守卫不能省：合成语料 / 没导入观测枢的部署里 obc 是 null，
+    // 直接调 .prepare 会让 openV1 整个构造失败（表现为 /v1 全部 503 corpus_not_configured）。
     if (obc) for (const x of obc.prepare('SELECT id, name, kind FROM obc_entries').all()) list.push({ kind: 'obc', domain: 'obc:' + x.kind, id: x.id, name: x.name });
     // 长的优先：避免「钟」这种单字名乱撞。
     // 但**不能把单字名一律丢掉** —— 主库里有 2 个单字名角色（琴、魈），
@@ -466,8 +517,6 @@ export function openV1(dataDir, { writable = true } = {}) {
     listTokens, findToken, tokensPrefix: TK,
     close() {
       try { db.close(); } catch { /* ignore */ }
-      try { if (obc) obc.close(); } catch { /* ignore */ }
-      try { ws.close(); } catch { /* ignore */ }
     },
   };
 }

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { openV1, V1_DOMAINS } from './lib/v1-data.mjs';
+import { openV1, V1_DOMAINS, SR_V1_DOMAINS, SR_DOMAINS } from './lib/v1-data.mjs';
 import { assessRetrieval, auditAnswer } from './lib/grounding.mjs';
 import { buildBlocks, summarizeBlocks, blockHintForPrompt, BLOCK_KINDS } from './lib/blocks.mjs';
 import { createRetriever, assembleContext, DEFAULT_BUDGET } from './chat/retrieve.mjs';
@@ -102,6 +102,11 @@ let v1 = null;
 let corpusProblem = '';
 try { v1 = openV1(DATA, { writable: false }); }
 catch { corpusProblem = '未配置资料库。请设置 KB_DATA_DIR 指向自行准备的资料目录。'; }
+// 星铁视图（game_id=2）。data/kb.sqlite 本来就是多游戏结构（games 表里
+// 1=原神 2=星铁 3=绝区零），openV1 传 gameId 就切过去了。
+// 星铁只有图鉴数据，没有剧情/语音语料，所以 chat/research 会拒绝。
+let srV1 = null;
+try { srV1 = openV1(DATA, { writable: false, gameId: 2 }); } catch { srV1 = null; }
 const videoIndex = loadVideoIndex(process.env.KB_VIDEO_INDEX_PATH || '');
 const libraryFile=path.join(path.dirname(process.env.AKASHA_WORKSPACE_DB || path.join(process.env.AKASHA_ROOT || path.dirname(HERE),'userData','workbench.sqlite')),'local-videos.json');
 const library=loadVideoIndex(libraryFile);
@@ -245,6 +250,9 @@ async function routeV1(req, res, url, seg) {
 
   const auth = authenticate(req);
   const gameId = url.searchParams.get('gameId') || 'genshin';
+  // 按游戏切数据视图：星铁走 srV1（game_id=2），其余走 v1（原神）。
+  const vX = (gameId === 'starrail' && srV1) ? srV1 : v1;
+  const vDomains = (gameId === 'starrail') ? SR_V1_DOMAINS : V1_DOMAINS;
   const game = games.get(gameId);
   const owner = games.scope(auth.hash, gameId, 'media');
   if (head === 'games') return sendJson(res, { games: games.list(), localOnly: true });
@@ -266,13 +274,18 @@ async function routeV1(req, res, url, seg) {
     if(req.method!=='POST')throw new ApiError(405,'method_not_allowed','请用 POST');
     const body=await readBody(req);resetSession(games.scope(auth.hash,gameId,body.sessionId));return sendJson(res,{ok:true});
   }
-  // 图片和媒体资源走独立的高配额桶，不跟对话抢额度（见 kb-viz 同名注释）。
+  // ── 限流分桶 ────────────────────────────────────────────────
+  // 图片（/v1/asset/*）和媒体资源走**独立的高配额桶**，不跟对话抢额度。
+  // 原因：一张材料表就有 29 个图标，加上头像、立绘，一次对话能打出上百个
+  // 图片请求；这些请求消耗的是磁盘 IO 而不是模型算力，跟对话放一个桶里
+  // 结果是「用户看一眼突破材料就被 429」。
+  // 而且所有客户端共用一个 token —— 放一个桶等于让所有用户共享 30 次/分钟。
   if (head === 'asset' || (head === 'media' && seg[2] === 'assets')) {
-    rateLimit(auth.hash + ':asset', 3000);
+    rateLimit(auth.hash + ':asset', 3000);          // 静态文件：很高，只防打爆
   } else if (head === 'media' && seg[2] === 'jobs') {
-    rateLimit(auth.hash + ':media-poll', 240);
+    rateLimit(auth.hash + ':media-poll', 240);      // 轮询任务进度
   } else {
-    rateLimit(auth.hash);
+    rateLimit(auth.hash);                            // 其余（检索/对话/计划…）按 RATE_PER_MIN
   }
   if(head==='status'){
     if(!statusCache || Date.now()-statusCache.at>30000){
@@ -359,10 +372,10 @@ async function routeV1(req, res, url, seg) {
 
   requireCorpus();
 
-  if (head === 'domains') return sendJson(res, { domains: V1_DOMAINS });
+  if (head === 'domains') return sendJson(res, { domains: vDomains });
 
   if (head === 'meta') {
-    const cov = v1.coverage();
+    const cov = vX.coverage();
     const limit = quotaLeft(auth);
     return sendJson(res, {
       ...cov,
@@ -390,10 +403,37 @@ async function routeV1(req, res, url, seg) {
 
   if (head === 'query') {
     const domain = url.searchParams.get('domain') || '';
-    if (!V1_DOMAINS.some((d) => d.domain === domain)) {
-      throw new ApiError(400, 'bad_domain', `domain 必须是 ${V1_DOMAINS.map((d) => d.domain).join(' | ')}`);
+    if (!vDomains.some((d) => d.domain === domain)) {
+      throw new ApiError(400, 'bad_domain', `domain 必须是 ${vDomains.map((d) => d.domain).join(' | ')}`);
     }
-    const out = v1.query({
+    // 星铁的图鉴域（光锥/遗器/材料/成就/模拟宇宙）落在 game_entries 表里，
+    // 不是原神那套 characters/books/obc，所以走单独一条 SQL。
+    // 星铁的 character 域仍然走 vX.query（characters 表里 game_id=2 的那批）。
+    if (gameId === 'starrail' && SR_DOMAINS.includes(domain)) {
+      const qtext = (url.searchParams.get('q') || '').trim();
+      const lim = Math.min(Number(url.searchParams.get('limit') || 20) || 20, 200);
+      const off = Math.max(Number(url.searchParams.get('offset') || 0) || 0, 0);
+      const where = ['game_id = ?', 'domain = ?'];
+      const params = [2, domain];
+      const rarity = url.searchParams.get('rarity');
+      if (qtext) { where.push('(name LIKE ? OR text LIKE ?)'); params.push('%' + qtext + '%', '%' + qtext + '%'); }
+      if (rarity) { where.push('rarity = ?'); params.push(Number(rarity)); }
+      const wsql = where.join(' AND ');
+      const total = vX.db.prepare(`SELECT COUNT(*) AS c FROM game_entries WHERE ${wsql}`).get(...params).c;
+      const rows = vX.db.prepare(
+        `SELECT entry_id AS id, name, sub, rarity, icon_url, text FROM game_entries
+         WHERE ${wsql} ORDER BY CAST(entry_id AS INTEGER) LIMIT ? OFFSET ?`
+      ).all(...params, lim, off);
+      return sendJson(res, {
+        domain, total, limit: lim, offset: off, truncated: total > off + rows.length,
+        items: rows.map((r) => ({
+          id: r.id, name: r.name, sub: r.sub, rarity: r.rarity, text: r.text,
+          // 图片统一走同源 /v1/asset/<domain>/<id>（客户端 CSP 是 img-src 'self'）
+          art: { icon: r.icon_url ? `/v1/asset/${domain}/${r.id}` : null },
+        })),
+      });
+    }
+    const out = vX.query({
       domain,
       q: url.searchParams.get('q') || '',
       where: url.searchParams.get('where') || '',
@@ -408,7 +448,7 @@ async function routeV1(req, res, url, seg) {
   if (head === 'record') {
     const kind = seg[2], id = seg[3];
     if (!kind || !id) throw new ApiError(400, 'bad_request', '用法：/v1/record/:kind/:id（kind = character | book | obc）');
-    const rec = v1.getRecord(kind, id);
+    const rec = vX.getRecord(kind, id);
     if (!rec) throw new ApiError(404, 'record_not_found', `没有 ${kind} #${id}`);
     return sendJson(res, rec);
   }
@@ -422,7 +462,7 @@ async function routeV1(req, res, url, seg) {
     const seed = Number(url.searchParams.get('seed')) || 1;
     let pool = [];
     try {
-      pool = v1.db.prepare(
+      pool = vX.db.prepare(
         'SELECT id, name FROM characters WHERE game_id = 1 AND has_icon = 1 ORDER BY id',
       ).all();
     } catch { pool = []; }
@@ -462,7 +502,8 @@ async function routeV1(req, res, url, seg) {
   if (head === 'asset') {
     const kind = seg[2], id = seg[3];
     const size = url.searchParams.get('size') || 'icon';
-    const file = v1.resolveArt(kind, id, size);
+    // 星铁的 kind 走 resolveArt 里的星铁分支（data/assets/sr/**）
+    const file = vX.resolveArt(kind, id, size) || (gameId === 'starrail' ? null : v1.resolveArt(kind, id, size));
     if (!file) throw new ApiError(404, 'asset_not_found', `没有 ${kind} #${id} 的 ${size} 资源`);
     const buf = fs.readFileSync(file);
     res.writeHead(200, {

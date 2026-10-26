@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="520" viewBox="0 0 720 520" fill="none">
+  <defs>
+    <radialGradient id="glow"><stop stop-color="#d9bf85" stop-opacity=".2"/><stop offset="1" stop-color="#d9bf85" stop-opacity="0"/></radialGradient>
+    <linearGradient id="veil" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#122b3c" stop-opacity="0"/><stop offset="1" stop-color="#122b3c" stop-opacity=".8"/></linearGradient>
+  </defs>
+  <circle cx="486" cy="238" r="225" fill="url(#glow)"/>
+  <g stroke="#d9bf85" stroke-opacity=".3" stroke-width="1">
+    <circle cx="486" cy="238" r="173"/><circle cx="486" cy="238" r="138" stroke-dasharray="2 8"/>
+    <ellipse cx="486" cy="238" rx="78" ry="173" transform="rotate(38 486 238)"/>
+    <ellipse cx="486" cy="238" rx="78" ry="173" transform="rotate(-38 486 238)"/>
+    <path d="M486 35v406M283 238h406M342 94l288 288M630 94 342 382"/>
+    <path d="m486 54 5 15-5 15-5-15 5-15ZM669 238l-15 5-15-5 15-5 15 5ZM486 422l-5-15 5-15 5 15-5 15ZM303 238l15-5 15 5-15 5-15-5Z" fill="#d9bf85" fill-opacity=".5"/>
+  </g>
+  <g fill="#f1dfb5" fill-opacity=".68"><circle cx="404" cy="92" r="2"/><circle cx="619" cy="151" r="1.5"/><circle cx="367" cy="293" r="1.5"/><circle cx="574" cy="370" r="2"/><circle cx="527" cy="72" r="1"/><circle cx="313" cy="191" r="1"/></g>
+  <path d="M0 420 142 344l91 56 111-105 87 87 104-83 185 111v110H0V420Z" fill="#102130" fill-opacity=".8"/>
+  <path d="m0 457 160-70 86 50 124-97 87 83 111-73 152 88v82H0v-63Z" fill="url(#veil)"/>
+</svg>
